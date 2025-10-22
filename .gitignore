@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# My ignore folders and files
+bkup/
+output/
+old/
+run_scripts/
+plots/
+.vscode/settings.json
+.vscode/launch.json
