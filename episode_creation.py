@@ -146,7 +146,6 @@ class Episode_Transformations:
         mean: List[float] = [0.5, 0.5, 0.5],
         std:  List[float] = [0.5, 0.5, 0.5],
         zoom_range: Tuple[float, float] = (0.05, 0.85),
-        normalize: bool = True,
         interpolation=transforms.InterpolationMode.BILINEAR,
     ):
         assert num_views > 0
@@ -154,12 +153,11 @@ class Episode_Transformations:
         self.size = int(size)
         self.geom_size = int(geom_size)
         self.mean, self.std = mean, std
-        self.normalize = normalize
         self.zoom_range = (float(zoom_range[0]), float(zoom_range[1]))
         self.interp = interpolation
 
         self.to_tensor = transforms.ToTensor()
-        self.norm = transforms.Normalize(mean=mean, std=std)
+        self.normalize = transforms.Normalize(mean=mean, std=std)
 
     # ---- simple samplers (customize for temporal coherence if you want) ---- #
     def _sample_zoom(self) -> float:
@@ -182,53 +180,72 @@ class Episode_Transformations:
             return img.resize((self.geom_size, self.geom_size), resample=Image.BILINEAR)
         return img
 
-    def __call__(self, pil_img: Image.Image):
-        assert isinstance(pil_img, Image.Image), "Input must be a PIL.Image"
-
-        base_img = self._ensure_geom_image(pil_img)  # enforce 224×224 geometry
-        W, H = base_img.size  # should be 224,224 as per your spec
-
-        views: List[torch.Tensor] = []
-        actions: List[torch.Tensor] = []
+    def _random_crop_image(self, base_img: Image.Image) -> Image.Image:
+        
+        W, H = base_img.size  # should be 224,224
 
         # Half-diagonal used for r normalization (constant for fixed W,H)
         R_hd = math.hypot(W / 2.0, H / 2.0)
 
-        # ---- single loop: each view is sampled independently from the original ---- #
-        for _ in range(self.num_views):
-            # 1) sample zoom and angle
-            zoom = self._sample_zoom()
-            sin_th, cos_th = self._sample_theta()
+        # 1) sample zoom and angle
+        zoom = self._sample_zoom()
+        sin_th, cos_th = self._sample_theta()
 
-            # 2) compute side in pixels from zoom
-            side_px = _zoom_to_side_px(zoom, W, H)
+        # 2) compute side in pixels from zoom
+        side_px = _zoom_to_side_px(zoom, W, H)
 
-            # 3) compute direction-aware, size-aware max R, then sample R
-            R_limit = _max_R_allowed(sin_th, cos_th, side_px, W, H)  # pixels
-            if R_limit <= 0.0:
-                R = 0.0
-            else:
-                R = random.uniform(0.0, R_limit)
+        # 3) compute direction-aware, size-aware max R, then sample R
+        R_limit = _max_R_allowed(sin_th, cos_th, side_px, W, H)  # pixels
+        if R_limit <= 0.0:
+            R = 0.0
+        else:
+            R = random.uniform(0.0, R_limit)
 
-            # 4) normalized radius r for the action payload
-            r_norm = 0.0 if R_hd == 0 else (R / R_hd)
-            # Clamp just in case of tiny FP overshoot
-            r_norm = _clamp(r_norm, 0.0, 1.0)
+        # 4) normalized radius r for the action payload
+        r_norm = 0.0 if R_hd == 0 else (R / R_hd)
+        # Clamp just in case of tiny FP overshoot
+        r_norm = _clamp(r_norm, 0.0, 1.0)
 
-            # 5) center and crop
-            cx, cy = _center_from_R_px(sin_th, cos_th, R, W, H)
-            top, left, h, w = _center_px_to_box(cx, cy, side_px, W, H)
+        # 5) center and crop
+        cx, cy = _center_from_R_px(sin_th, cos_th, R, W, H)
+        top, left, h, w = _center_px_to_box(cx, cy, side_px, W, H)
 
-            crop = F.resized_crop(base_img, top, left, h, w, [self.size, self.size], interpolation=self.interp)
-            v = self.to_tensor(crop)
-            if self.normalize:
-                v = self.norm(v)
-            views.append(v)
+        crop = F.resized_crop(base_img, top, left, h, w, [self.size, self.size], interpolation=self.interp)
+        act = torch.tensor([sin_th, cos_th, r_norm, zoom], dtype=torch.float32)
 
-            # 6) store action for *this* view
-            actions.append(torch.tensor([sin_th, cos_th, r_norm, zoom], dtype=torch.float32))
+        return crop, act
 
-        views = torch.stack(views, dim=0)
+
+
+    def __call__(self, pil_img: Image.Image):
+        assert isinstance(pil_img, Image.Image), "Input must be a PIL.Image"
+        base_img = self._ensure_geom_image(pil_img)  # enforce 224×224 geometry
+
+        views = torch.zeros(self.num_views, 3, base_img.size[0], base_img.size[1])
+        actions = []
+
+        for i in range(self.num_views):
+            view_actions = []
+
+            view, action_cropbb = self._random_crop_image(base_img)
+            view_actions.append(("crop", action_cropbb))
+
+            # Todo:
+            # Horizontal flip: 1 means active, 0 means inactive
+            # Color jitter: for inactive use the set of values the mean that nothing is done.
+            # threaugment
+            #    if choice 0 -> grayscale p=1, blur p=0, solar p =0
+            #    if choice 1 -> grayscale p=0, blur p=1, solar p =0
+            #    if choice 2 -> grayscale p=0, blur p=0, solar p =1
+            # With that way, I can get the action parameters for the unselected cases
+            # For example, for grayscale, 1 means active, 0 means inactive
+            # For blur, it is based on the sigma value. A very low sigma basically means no blur
+            # For solar, it is based on the ratio of pixels that are solarized to the total number of pixels. 0 means no solarization
+
+            # Append view and view actions
+            views[i] = self.normalize(self.to_tensor(view))
+            actions.append(view_actions)
+
         return views, actions
 
 if __name__ == "__main__":
@@ -249,7 +266,6 @@ if __name__ == "__main__":
         mean=[0.5, 0.5, 0.5],
         std=[0.5, 0.5, 0.5],
         zoom_range=(0.08, 0.5),
-        normalize=True,
         interpolation=transforms.InterpolationMode.BILINEAR
     )
 
