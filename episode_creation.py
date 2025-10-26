@@ -6,6 +6,52 @@ import torch
 from PIL import Image
 from torchvision import transforms
 import torchvision.transforms.functional as F
+from torchvision.datasets import ImageFolder
+import hashlib
+
+from PIL import ImageFilter, ImageOps, ImageFilter
+
+class DeterministicEpisodes:
+    """
+    Wraps a stochastic Episode_Transformations to make its randomness
+    deterministic per *image path* (key). This ensures a fixed val episode set.
+    """
+    def __init__(self, base_transform, base_seed: int = 0):
+        self.base_transform = base_transform
+        self.base_seed = int(base_seed)
+
+    @staticmethod
+    def _seed_from_key(key: str, base_seed: int) -> int:
+        # Stable 64-bit hash → 31-bit torch seed
+        h = hashlib.blake2b(key.encode('utf-8'), digest_size=8).digest()
+        s = int.from_bytes(h, 'big') ^ base_seed
+        return s % (2**31 - 1)
+
+    def __call__(self, img, *, key: str):
+        # Isolate RNG so we don't disturb global state
+        py_state = random.getstate()
+        try:
+            seed = self._seed_from_key(key, self.base_seed)
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(seed)
+                random.seed(seed)
+                return self.base_transform(img)  # returns (views, aug_seq)
+        finally:
+            random.setstate(py_state)
+
+class ImageFolderDetEpisodes(ImageFolder):
+    """
+    ImageFolder that passes the file path as a 'key' to DeterministicEpisodes.
+    """
+    def __getitem__(self, index):
+        path, target = self.samples[index]
+        sample = self.loader(path)
+        if self.transform is not None:
+            # Expect DeterministicEpisodes here
+            sample = self.transform(sample, key=path)
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+        return sample, target
 
 def collate_function(batch):
     """
@@ -145,8 +191,16 @@ class Episode_Transformations:
         geom_size: int = 224,            # we compute geometry on a 224×224 canvas (your spec)
         mean: List[float] = [0.5, 0.5, 0.5],
         std:  List[float] = [0.5, 0.5, 0.5],
-        zoom_range: Tuple[float, float] = (0.05, 0.85),
+        zoom_range: Tuple[float, float] = (0.08, 0.8),
         interpolation=transforms.InterpolationMode.BILINEAR,
+        p_hflip: float = 0.5,
+        p_color_jitter: float = 0.8,
+        brightness: float = 0.4,
+        contrast: float = 0.4,
+        saturation: float = 0.2,
+        hue: float = 0.1,
+        p_threeaugment: float = 0.9,
+        sigma_range: Tuple[float, float] = (0.1, 2.0)
     ):
         assert num_views > 0
         self.num_views = int(num_views)
@@ -156,9 +210,21 @@ class Episode_Transformations:
         self.zoom_range = (float(zoom_range[0]), float(zoom_range[1]))
         self.interp = interpolation
 
-        self.to_tensor = transforms.ToTensor()
+        self.totensor = transforms.ToTensor()
         self.normalize = transforms.Normalize(mean=mean, std=std)
-
+        
+        # horizontal flip
+        self.p_hflip = p_hflip
+        # color jitter
+        self.p_color_jitter = p_color_jitter
+        self.brightness_range = [1-brightness, 1+brightness]
+        self.contrast_range = [1-contrast, 1+contrast]
+        self.saturation_range = [1-saturation, 1+saturation]
+        self.hue_range = [-hue, hue]
+        # threeaugment
+        self.p_threeaugment = p_threeaugment
+        self.sigma_range = sigma_range
+        
     # ---- simple samplers (customize for temporal coherence if you want) ---- #
     def _sample_zoom(self) -> float:
         z0, z1 = self.zoom_range
@@ -180,42 +246,132 @@ class Episode_Transformations:
             return img.resize((self.geom_size, self.geom_size), resample=Image.BILINEAR)
         return img
 
-    def _random_crop_image(self, base_img: Image.Image) -> Image.Image:
+    @staticmethod
+    def _minmax01(x, lo, hi):
+        """map [lo,hi] → [0,1]"""
+        return (x - lo) / (hi - lo)
+
+    @staticmethod
+    def _minmax11(x, lo, hi):
+        """map [lo,hi] → [-1,1] (centre at 0)"""
+        return 2.0 * (x - lo) / (hi - lo) - 1.0
+
+    def _random_crop_image(self, base_img: Image.Image, fix_center_crop: bool = False) -> Image.Image:
         
         W, H = base_img.size  # should be 224,224
+        R_hd = math.hypot(W / 2.0, H / 2.0) # Half-diagonal used for r normalization (constant for fixed W,H)
 
-        # Half-diagonal used for r normalization (constant for fixed W,H)
-        R_hd = math.hypot(W / 2.0, H / 2.0)
-
-        # 1) sample zoom and angle
-        zoom = self._sample_zoom()
-        sin_th, cos_th = self._sample_theta()
-
-        # 2) compute side in pixels from zoom
-        side_px = _zoom_to_side_px(zoom, W, H)
-
-        # 3) compute direction-aware, size-aware max R, then sample R
-        R_limit = _max_R_allowed(sin_th, cos_th, side_px, W, H)  # pixels
-        if R_limit <= 0.0:
+        if not fix_center_crop: # Sample random crop
+            # 1) sample zoom and angle
+            zoom = self._sample_zoom()
+            sin_th, cos_th = self._sample_theta()
+            # 2) compute side in pixels from zoom
+            side_px = _zoom_to_side_px(zoom, W, H)
+            # 3) compute direction-aware, size-aware max R, then sample R
+            R_limit = _max_R_allowed(sin_th, cos_th, side_px, W, H)  # pixels
+            if R_limit <= 0.0:
+                R = 0.0
+            else:
+                R = random.uniform(0.0, R_limit)
+            # 4) normalized radius r for the action payload
+            r_norm = 0.0 if R_hd == 0 else (R / R_hd)
+            r_norm = _clamp(r_norm, 0.0, 1.0) # Clamp just in case of tiny FP overshoot
+        else: # Get crop for the center of the image
+            zoom = self._sample_zoom()
+            sin_th, cos_th = 0.0, 1.0
+            side_px = _zoom_to_side_px(zoom, W, H)
             R = 0.0
-        else:
-            R = random.uniform(0.0, R_limit)
+            r_norm = 0.0
 
-        # 4) normalized radius r for the action payload
-        r_norm = 0.0 if R_hd == 0 else (R / R_hd)
-        # Clamp just in case of tiny FP overshoot
-        r_norm = _clamp(r_norm, 0.0, 1.0)
-
-        # 5) center and crop
+        # 5) Get top left h w from polar params and crop
         cx, cy = _center_from_R_px(sin_th, cos_th, R, W, H)
         top, left, h, w = _center_px_to_box(cx, cy, side_px, W, H)
-
         crop = F.resized_crop(base_img, top, left, h, w, [self.size, self.size], interpolation=self.interp)
+        # 6) Create action tensor with polar params and zoom
         act = torch.tensor([sin_th, cos_th, r_norm, zoom], dtype=torch.float32)
 
         return crop, act
 
+    def _apply_random_flip(self, img, p_hflip):
+        flip_code = 0
+        hflip_flag=False
+        if torch.rand(1) < p_hflip:
+            img = F.hflip(img)
+            flip_code = 1
+            hflip_flag=True
+        return img, torch.tensor([flip_code], dtype=torch.float), hflip_flag
 
+    def _color_jitter(self, img_input, p_color_jitter, brightness_range, contrast_range, saturation_range, hue_range):
+        # ColorJitter  -- use with caution. Values w/o _check_input for range test
+        color_jitter_code = [1., 1., 1., 0.] # Values for no changes
+        jitter_flag=False
+        # Order: first brightness, then contrast, then saturation, then hue.
+        if torch.rand(1) < p_color_jitter:
+            brightness_factor = torch.empty(1).uniform_(brightness_range[0], brightness_range[1]).item()
+            img = F.adjust_brightness(img_input, brightness_factor)
+            color_jitter_code[0] = brightness_factor
+
+            contrast_factor = torch.empty(1).uniform_(contrast_range[0], contrast_range[1]).item()
+            img = F.adjust_contrast(img, contrast_factor)
+            color_jitter_code[1] = contrast_factor
+
+            saturation_factor = torch.empty(1).uniform_(saturation_range[0], saturation_range[1]).item()
+            img = F.adjust_saturation(img, saturation_factor)
+            color_jitter_code[2] = saturation_factor
+
+            hue_factor = torch.empty(1).uniform_(hue_range[0], hue_range[1]).item()
+            img = F.adjust_hue(img, hue_factor)
+            color_jitter_code[3] = hue_factor
+            jitter_flag=True
+        else:
+            img = img_input
+        
+        # Calculate the mean per channel of img_input and img. (img_input is a PIL image)
+        # Idea from this paper: https://arxiv.org/abs/2306.06082
+        img_input_tensor = self.totensor(img_input)
+        mean_input = img_input_tensor.mean(dim=(1, 2))
+        img_tensor = self.totensor(img)
+        mean_output = img_tensor.mean(dim=(1, 2))
+        # get mean diff
+        mean_diff = mean_input - mean_output
+        # Concatenate the mean diff with the color_jitter_code
+        color_jitter_code = color_jitter_code + [mean_diff[0].item(), mean_diff[1].item(), mean_diff[2].item()]
+
+        return img, torch.tensor(color_jitter_code, dtype=torch.float), jitter_flag
+
+    def apply_random_grayscale(self, img, p_grayscale):
+        # RandomGrayscale
+        grayscale_code = 0
+        gray_flag=False
+        if torch.rand(1) < p_grayscale:
+            num_output_channels, _, _ = F.get_dimensions(img)
+            img = F.rgb_to_grayscale(img, num_output_channels=num_output_channels)
+            grayscale_code = 1
+            gray_flag=True
+        return img, torch.tensor([grayscale_code], dtype=torch.float), gray_flag
+
+    def apply_gaussian_blur(self, img, p_gaussian_blur, sigma_range):
+        # GaussianBlur
+        gaussian_blur_code = 0.1 # applying 0.1 is basically no blur (output image values are the same as input image values)
+        blur_flag=False
+        if torch.rand(1) < p_gaussian_blur:
+            sigma = torch.empty(1).uniform_(sigma_range[0], sigma_range[1]).item()
+            img = img.filter(ImageFilter.GaussianBlur(sigma))
+            gaussian_blur_code = sigma
+            blur_flag=True
+        return img, torch.tensor([gaussian_blur_code], dtype=torch.float), blur_flag
+    
+    def apply_solarization(self, img, p_solarization):
+        # Solarization
+        solarization_code = 0
+        solar_flag=False
+        if torch.rand(1) < p_solarization:
+            # solarization_code = 1
+            # solarization code is the ratio of pixel that are solarized to the total number of pixels
+            solarization_code = torch.sum(self.totensor(img) > 0.5) / (3 * img.size[0] * img.size[1])
+            img = ImageOps.solarize(img, threshold=128)
+            solar_flag=True
+        return img, torch.tensor([solarization_code], dtype=torch.float), solar_flag
 
     def __call__(self, pil_img: Image.Image):
         assert isinstance(pil_img, Image.Image), "Input must be a PIL.Image"
@@ -227,23 +383,58 @@ class Episode_Transformations:
         for i in range(self.num_views):
             view_actions = []
 
-            view, action_cropbb = self._random_crop_image(base_img)
-            view_actions.append(("crop", action_cropbb))
+            ## Crop
+            if i ==0: # First view (Crop is always at the center of the image. No other augs are done)
+                view, action_cropbb = self._random_crop_image(base_img, fix_center_crop = True)
+                view_actions.append(("crop", action_cropbb))
+                views[i] = self.normalize(self.totensor(view))
+                actions.append(view_actions)
+                continue
+            else: # other views: random crop
+                view, action_cropbb = self._random_crop_image(base_img)
+                view_actions.append(("crop", action_cropbb))
 
-            # Todo:
-            # Horizontal flip: 1 means active, 0 means inactive
-            # Color jitter: for inactive use the set of values the mean that nothing is done.
-            # threaugment
-            #    if choice 0 -> grayscale p=1, blur p=0, solar p =0
-            #    if choice 1 -> grayscale p=0, blur p=1, solar p =0
-            #    if choice 2 -> grayscale p=0, blur p=0, solar p =1
-            # With that way, I can get the action parameters for the unselected cases
-            # For example, for grayscale, 1 means active, 0 means inactive
-            # For blur, it is based on the sigma value. A very low sigma basically means no blur
-            # For solar, it is based on the ratio of pixels that are solarized to the total number of pixels. 0 means no solarization
+            ## Horizontal Flip
+            view, action_horizontalflip, hflip_flag = self._apply_random_flip(view, self.p_hflip)
+            if hflip_flag:
+                view_actions.append(("hflip", torch.empty(0))) # param-less. Only needs type_emb later on.
+
+            ## ColorJitter
+            view, action_colorjitter, jitter_flag = self._color_jitter(view, p_color_jitter = self.p_color_jitter, 
+                                                                    brightness_range = self.brightness_range, 
+                                                                    contrast_range = self.contrast_range, 
+                                                                    saturation_range = self.saturation_range, 
+                                                                    hue_range = self.hue_range)
+            if jitter_flag:
+                action_colorjitter[0] = self._minmax11(action_colorjitter[0], self.brightness_range[0], self.brightness_range[1])
+                action_colorjitter[1] = self._minmax11(action_colorjitter[1], self.contrast_range[0], self.contrast_range[1])
+                action_colorjitter[2] = self._minmax11(action_colorjitter[2], self.saturation_range[0], self.saturation_range[1])
+                action_colorjitter[3] = self._minmax11(action_colorjitter[3], self.hue_range[0], self.hue_range[1])
+                view_actions.append(("jitter", action_colorjitter))
+
+            if torch.rand(1) < self.p_threeaugment: # apply threeaugment with a probability
+                # ThreeAgument from Deit3: Randomly choose between grayscale, gaussian blur, and solarization (uniformly)
+                choice = random.randint(0, 2)
+                ## Grayscale
+                if choice == 0:
+                    view, action_grayscale, gray_flag = self.apply_random_grayscale(view, p_grayscale = 1.0)
+                    if gray_flag:
+                        view_actions.append(("gray", torch.empty(0))) # param-less. Only needs type_emb later on.
+                ## Gaussian Blur
+                elif choice == 1:
+                    view, action_gaussianblur, blur_flag = self.apply_gaussian_blur(view, p_gaussian_blur = 1.0, sigma_range = self.sigma_range)
+                    if blur_flag:
+                        sigma_log  = math.log(action_gaussianblur.item() / self.sigma_range[0]) / math.log(self.sigma_range[1] / self.sigma_range[0])
+                        sigma_norm = 2.0 * sigma_log - 1.0 # [-1, 1]
+                        view_actions.append(("blur", torch.tensor([sigma_norm], dtype=torch.float)))
+                ## Solarization
+                elif choice == 2:
+                    view, action_solarization, solar_flag = self.apply_solarization(view, p_solarization = 1.0)
+                    if solar_flag:
+                        view_actions.append(("solar", action_solarization))
 
             # Append view and view actions
-            views[i] = self.normalize(self.to_tensor(view))
+            views[i] = self.normalize(self.totensor(view))
             actions.append(view_actions)
 
         return views, actions
