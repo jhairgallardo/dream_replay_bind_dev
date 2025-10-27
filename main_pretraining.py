@@ -471,7 +471,6 @@ def main():
                 with torch.no_grad():
                     # View Encoder forward pass
                     flat_imgfttoks, flat_ret2D = view_encoder(episodes_plot_imgs.reshape(N * V, C, H, W))
-                    Timg, Dimg = flat_imgfttoks.shape[1], flat_imgfttoks.shape[2]
                     noflat_imgfttoks = flat_imgfttoks.reshape(N, V, flat_imgfttoks.size(1), -1) # (N, V, Timg, Dimg)
                     noflat_ret2D = flat_ret2D.reshape(N, V, flat_ret2D.size(1), -1) # (N, V, Timg, 2)
 

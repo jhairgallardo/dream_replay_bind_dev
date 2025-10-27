@@ -91,8 +91,8 @@ class Seek_Network(nn.Module):
         noflat_retpatch_hidden = self.retpatch_mlp_in(noflat_retpatch) # (B, V, Timg, Dhidden)
 
         # 2) Add type embeddings
-        noflat_retpatch_hidden = noflat_retpatch_hidden + self.type_emb_retpatch.reshape(1,1,1,Dhidden).expand(B,V,Timg,Dhidden) # (B, V, Timg, Dhidden)
         noflat_acttok_hidden = noflat_acttok_hidden + self.type_emb_acttok.reshape(1,1,1,Dhidden).expand(B,V,1,Dhidden) # (B, V, 1, Dhidden)
+        noflat_retpatch_hidden = noflat_retpatch_hidden + self.type_emb_retpatch.reshape(1,1,1,Dhidden).expand(B,V,Timg,Dhidden) # (B, V, Timg, Dhidden)
 
         # 3) Concatenate the tokens for each view and reshape to (B, V*Timg, Dhidden)
         base_seqs = torch.cat((noflat_acttok_hidden, noflat_retpatch_hidden), dim=2) # (B, V, 1+Timg, Dhidden)

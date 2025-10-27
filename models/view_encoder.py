@@ -216,9 +216,7 @@ class vit_models(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
         x = x + self.pos_embed
-        # cls_tokens = self.cls_token.expand(B, -1, -1)
         register_tokens = self.register_tokens.expand(B, -1, -1)
-        # x = torch.cat((cls_tokens, x, register_tokens), dim=1)
         x = torch.cat((x, register_tokens), dim=1)
         
         # Apply blocks
@@ -245,7 +243,7 @@ class vit_models(nn.Module):
         ph, pw = to_2tuple(patch_size)
         ih, iw = to_2tuple(img_size)
 
-        # x: right-positive; y: up-positive
+        # x-axis: right-positive; y-axis: up-positive
         xs = (torch.arange(Gw, device=x.device, dtype=x.dtype) + 0.5) * pw - (iw / 2)
         ys = - (torch.arange(Gh, device=x.device, dtype=x.dtype) + 0.5) * ph + (ih / 2)
 
