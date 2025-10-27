@@ -406,10 +406,10 @@ class Episode_Transformations:
                 if crop_flag:
                     view_actions.append(("crop", action_cropbb))
 
-            # ## Horizontal Flip 
-            # view, action_horizontalflip, hflip_flag = self._apply_random_flip(view, self.p_hflip)
-            # if hflip_flag:
-            #     view_actions.append(("hflip", torch.empty(0))) # param-less. Only needs type_emb later on.
+            ## Horizontal Flip 
+            view, action_horizontalflip, hflip_flag = self._apply_random_flip(view, self.p_hflip)
+            if hflip_flag:
+                view_actions.append(("hflip", torch.empty(0))) # param-less. Only needs type_emb later on.
 
             ## ColorJitter
             view, action_colorjitter, jitter_flag = self._color_jitter(view, p_color_jitter = self.p_color_jitter, 
