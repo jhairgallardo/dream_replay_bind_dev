@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +13,10 @@ from timm.layers import DropPath, to_2tuple, trunc_normal_
 #    - If out_before_pool is True, return the output before pooling. It returns all tokens, not just the cls token.
 # -> Changed attention mechanism to use Flash Attention.
 # -> Added register tokens following "Vision Transformers Need Registers" (https://arxiv.org/abs/2309.16588)
+# -> No CLS token
+# -> No head (classifier head). It returns all patch tokens
+# -> No dropout for head since there is no head
+# -> Added 2-D Retinotopic positions (each patch center position, expanded across batch)
 
 class Attention(nn.Module):
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
@@ -146,36 +149,6 @@ class Block_paralx2(nn.Module):
         x = x + self.drop_path(self.attn(self.norm1(x))) + self.drop_path(self.attn1(self.norm11(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x))) + self.drop_path(self.mlp1(self.norm21(x)))
         return x
-        
-        
-class hMLP_stem(nn.Module):
-    """ hMLP_stem: https://arxiv.org/pdf/2203.09795.pdf
-    taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-    with slight modifications
-    """
-    def __init__(self, img_size=224,  patch_size=16, in_chans=3, embed_dim=768,norm_layer=nn.SyncBatchNorm):
-        super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        num_patches = (img_size[1] // patch_size[1]) * (img_size[0] // patch_size[0])
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.num_patches = num_patches
-        self.proj = torch.nn.Sequential(*[nn.Conv2d(in_chans, embed_dim//4, kernel_size=4, stride=4),
-                                          norm_layer(embed_dim//4),
-                                          nn.GELU(),
-                                          nn.Conv2d(embed_dim//4, embed_dim//4, kernel_size=2, stride=2),
-                                          norm_layer(embed_dim//4),
-                                          nn.GELU(),
-                                          nn.Conv2d(embed_dim//4, embed_dim, kernel_size=2, stride=2),
-                                          norm_layer(embed_dim),
-                                         ])
-        
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.proj(x).flatten(2).transpose(1, 2)
-        return x
     
 class vit_models(nn.Module):
     """ Vision Transformer with LayerScale (https://arxiv.org/abs/2103.17239) support
@@ -183,7 +156,7 @@ class vit_models(nn.Module):
     with slight modifications
     """
     def __init__(self, img_size=224,  patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
+                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, global_pool=None,
                  block_layers = Block,
                  Patch_layer=PatchEmbed,act_layer=nn.GELU,
@@ -192,22 +165,20 @@ class vit_models(nn.Module):
                 mlp_ratio_clstk = 4.0,**kwargs):
         super().__init__()
 
-        self.dropout_rate = drop_rate
-
-
+        self.num_reg_tokens = 16
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim
 
         self.patch_embed = Patch_layer(
                 img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
-        num_patches = self.patch_embed.num_patches
-        self.num_reg_tokens = 16
-
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.num_patches = self.patch_embed.num_patches
+        self.patch_size = patch_size
+        self.grid_size = self.patch_embed.grid_size
+        self.img_size = img_size
 
         self.register_tokens = nn.Parameter(torch.zeros(1, self.num_reg_tokens, embed_dim))
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
 
         dpr = [drop_path_rate for i in range(depth)]
         self.blocks = nn.ModuleList([
@@ -219,11 +190,7 @@ class vit_models(nn.Module):
             
         self.norm = norm_layer(embed_dim)
 
-        self.feature_info = [dict(num_chs=embed_dim, reduction=0, module='head')]
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
-
         trunc_normal_(self.pos_embed, std=.02)
-        trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.register_tokens, std=.02)
         self.apply(self._init_weights)
 
@@ -238,51 +205,57 @@ class vit_models(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'pos_embed', 'cls_token', 'register_tokens'}
-
-    def get_classifier(self):
-        return self.head
+        return {'pos_embed', 'register_tokens'}
     
     def get_num_layers(self):
         return len(self.blocks)
-    
-    def reset_classifier(self, num_classes, global_pool=''):
-        self.num_classes = num_classes
-        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward(self, x, out_before_pool=False): # out_before_pool: if True, return the output before pooling
+    def forward(self, x):
 
         # Patchify, add pos embed and cls token
         B = x.shape[0]
         x = self.patch_embed(x)
         x = x + self.pos_embed
-        cls_tokens = self.cls_token.expand(B, -1, -1)
+        # cls_tokens = self.cls_token.expand(B, -1, -1)
         register_tokens = self.register_tokens.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x, register_tokens), dim=1)
+        # x = torch.cat((cls_tokens, x, register_tokens), dim=1)
+        x = torch.cat((x, register_tokens), dim=1)
         
         # Apply blocks
         for i , blk in enumerate(self.blocks):
             x = blk(x)
-        # Normalize final output (if pooling is avg, do normalization after pooling)
+
+        # Normalize final output
         x = self.norm(x)
 
         # Remove register tokens
         x = x[:, :-self.num_reg_tokens]
 
-        if out_before_pool:
-            return x
+        # 2-D Retinotopic positions (each patch center position, expanded across batch)
+        # It should be a variable called "ret2D" with shape (B, Timg, 2)
+        # which indicates the 2-D position of the each patch center in the image (It is the same for all images in the batch)
+        # Images are size 224x224. The grid_size is (14, 14). The patch_size is 16.
+        grid_size = self.grid_size # Example: (14, 14) for deit_tiny_patch16_LS
+        patch_size = self.patch_size # Example: 16 for deit_tiny_patch16_LS
+        img_size = self.img_size # Example: 224 for deit_tiny_patch16_LS
+        num_patches = self.num_patches # Example: 196 for deit_tiny_patch16_LS
+        ret2D=torch.zeros(B, num_patches, 2)
 
-        # pooling is 'token' (take cls token)
-        x = x[:, 0]        
+        Gh, Gw = grid_size
+        ph, pw = to_2tuple(patch_size)
+        ih, iw = to_2tuple(img_size)
 
-        # drop out before classifier head
-        if self.dropout_rate:
-            x = F.dropout(x, p=float(self.dropout_rate), training=self.training)
-        # Classifier head
-        x = self.head(x)
+        # x: right-positive; y: up-positive
+        xs = (torch.arange(Gw, device=x.device, dtype=x.dtype) + 0.5) * pw - (iw / 2)
+        ys = - (torch.arange(Gh, device=x.device, dtype=x.dtype) + 0.5) * ph + (ih / 2)
 
-        return x
+        yy, xx = torch.meshgrid(ys, xs, indexing='ij')  # (Gh, Gw)
+        ret2D = torch.stack([xx, yy], dim=-1).reshape(1, Gh * Gw, 2).expand(B, -1, -1)
 
+        # Normalize ret2D to [-1, 1]
+        ret2D = ret2D / 112.0  # shape (B, Timg, 2), ~[-0.928, 0.928] for 224/16
+
+        return x, ret2D
 
 def deit_tiny_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
@@ -312,4 +285,10 @@ def deit_large_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block, **kwargs)
+    return model
+
+def deit_huge_patch14_LS(pretrained=False, img_size=224, pretrained_21k = False,  **kwargs):
+    model = vit_models(
+        img_size = img_size, patch_size=14, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers = Layer_scale_init_Block, **kwargs)
     return model
