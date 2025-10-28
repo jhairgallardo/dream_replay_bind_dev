@@ -19,7 +19,6 @@ class SinCosPE(nn.Module):
 class Seek_Network(nn.Module):
     def __init__(self, 
                  d_model=256,
-                 n_img_tokens=196, 
                  imgfttok_dim=192,
                  ret2d_dim=2,
                  acttok_dim=64, 

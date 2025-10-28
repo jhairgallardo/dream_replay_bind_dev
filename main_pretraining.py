@@ -128,8 +128,7 @@ def main():
                                             n_layers=args.act_enc_n_layers, 
                                             n_heads=args.act_enc_n_heads, 
                                             dim_ff=args.act_enc_dim_ff)
-    seek = Seek_Network(d_model=args.seek_dim, 
-                        n_img_tokens=view_encoder.patch_embed.num_patches, 
+    seek = Seek_Network(d_model=args.seek_dim,
                         imgfttok_dim=view_encoder.embed_dim, 
                         acttok_dim=args.act_enc_dim,
                         num_layers=args.seek_n_layers, 
