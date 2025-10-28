@@ -82,25 +82,25 @@ class Seek_Network(nn.Module):
         Dhidden = self.hidden_dim
         Dret2D = noflat_ret2D.shape[-1]
 
-        # 0) Concatenate the image features and the ret2D features
+        # 1) Concatenate the image features and the ret2D features
         noflat_retpatch = torch.cat((noflat_imgfttoks, noflat_ret2D), dim=-1) # (B, V, Timg, Dimg+Dret2D)
 
-        # 1) Project the input tokens to the hidden dimension and normalize
+        # 2) Project the input tokens to the hidden dimension and normalize
         noflat_acttok_hidden = self.acttok_mlp_in(noflat_acttok) # (B, V, 1, Dhidden)
         noflat_retpatch_hidden = self.retpatch_mlp_in(noflat_retpatch) # (B, V, Timg, Dhidden)
 
-        # 2) Add type embeddings
+        # 3) Add type embeddings
         noflat_acttok_hidden = noflat_acttok_hidden + self.type_emb_acttok.reshape(1,1,1,Dhidden).expand(B,V,1,Dhidden) # (B, V, 1, Dhidden)
         noflat_retpatch_hidden = noflat_retpatch_hidden + self.type_emb_retpatch.reshape(1,1,1,Dhidden).expand(B,V,Timg,Dhidden) # (B, V, Timg, Dhidden)
 
-        # 3) Concatenate the tokens for each view and reshape to (B, V*Timg, Dhidden)
+        # 4) Concatenate the tokens for each view and reshape to (B, V*Timg, Dhidden)
         base_seqs = torch.cat((noflat_acttok_hidden, noflat_retpatch_hidden), dim=2) # (B, V, 1+Timg, Dhidden)
         base_seqs = base_seqs.reshape(B, V*(1+Timg), Dhidden) # (B, V*(1+Timg), Dhidden)
 
-        # 4) Pre-compute positional encoding
+        # 5) Pre-compute positional encoding
         pe = self.pe(base_seqs.size(1)) # (1, V*(1+Timg), Dhidden)
 
-        # 5) Normalize mask token and add type embedding
+        # 6) Normalize mask token and add type embedding
         mask_retpatchtok = self.mask_retpatchtok + self.type_emb_mask_retpatchtok # (Dhidden)
 
         # 7) Generate a random mask (like in MAE). We won't replace the complete view with mask tokens, only a subset of the tokens selected by the random mask.
@@ -115,7 +115,7 @@ class Seek_Network(nn.Module):
         num_masked_tokens = int(Timg * ratio)
         mask_indices = torch.randperm(Timg)[:num_masked_tokens]
 
-        # 7) Predict current view by replacing its input tokens with mask tokens (dev3)-> Include view 1
+        # 8) Predict current view by replacing its input tokens with mask tokens (dev3)-> Include view 1
         noflat_PRED_imgfttoks = torch.zeros_like(noflat_imgfttoks, device=noflat_imgfttoks.device) # (B, V, Timg, Dimg)
         for i in range(V):
             # Clone sequences
