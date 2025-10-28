@@ -3,6 +3,7 @@ import os, time
 
 import torch
 import torchvision
+import torch.nn.functional as F
 from torchvision.datasets import ImageFolder
 
 from episode_creation import Episode_Transformations, collate_function_notaskid, DeterministicEpisodes, ImageFolderDetEpisodes
@@ -11,6 +12,7 @@ from models.view_encoder import deit_tiny_patch16_LS
 from models.action_encoder import Action_Encoder_Network
 from models.seek import Seek_Network
 from models.generator import Generator_Network
+from models.classifier import Classifier_Network
 
 from utils import MetricLogger, accuracy, time_duration_print, build_stratified_indices, make_plot_batch
 
@@ -48,8 +50,8 @@ parser.add_argument('--seek_dropout', type=float, default=0)
 # Generator parameters
 parser.add_argument('--gen_num_Blocks', type=list, default=[1,1,1,1])
 # Classifier parameters
-
-
+parser.add_argument('--lr_classifier', type=float, default=0.003)
+parser.add_argument('--wd_classifier', type=float, default=0)
 # Training parameters
 parser.add_argument('--lr', type=float, default=0.0008)
 parser.add_argument('--wd', type=float, default=0.05)
@@ -57,6 +59,8 @@ parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--warmup_epochs', type=int, default=5)
 parser.add_argument('--episode_batch_size', type=int, default=80)
 parser.add_argument('--num_views', type=int, default=4)
+parser.add_argument('--coeff_mse', type=float, default=0.0)
+parser.add_argument('--coeff_bce', type=float, default=1.0)
 # Other parameters
 parser.add_argument('--workers', type=int, default=32)
 parser.add_argument('--save_dir', type=str, default="output/Pretraining/run_debug")
@@ -136,7 +140,7 @@ def main():
     generator = Generator_Network(in_planes=view_encoder.embed_dim, 
                                   num_Blocks=args.gen_num_Blocks, 
                                   nc=3)
-    # classifier =     
+    classifier = Classifier_Network(input_dim=view_encoder.embed_dim, num_classes=args.num_classes) # When using bind, input dim is the output dim of bind
                                                   
     ### Print models
     fabric.print('\nView encoder')
@@ -149,8 +153,8 @@ def main():
     # fabric.print(bind)
     fabric.print('\nGenerator')
     fabric.print(generator)
-    # fabric.print('\nClassifier')
-    # fabric.print(classifier)
+    fabric.print('\nClassifier')
+    fabric.print(classifier)
     fabric.print('\n')
 
     ### Setup models
@@ -159,7 +163,7 @@ def main():
     seek = fabric.setup_module(seek)
     # bind = fabric.setup_module(bind)
     generator = fabric.setup_module(generator)
-    # classifier = fabric.setup_module(classifier)
+    classifier = fabric.setup_module(classifier)
 
     ### Define optimizers
     param_groups = [
@@ -168,7 +172,7 @@ def main():
                     {'params': seek.parameters(), 'lr': args.lr, 'weight_decay': 0},
                     # {'params': bind.parameters(), 'lr': args.lr, 'weight_decay': args.wd},
                     {'params': generator.parameters(), 'lr': args.lr, 'weight_decay': 0},
-                    # {'params': classifier.parameters(), 'lr': args.lr, 'weight_decay': args.wd},
+                    {'params': classifier.parameters(), 'lr': args.lr_classifier, 'weight_decay': args.wd_classifier},
                     ]
     optimizer = torch.optim.AdamW(param_groups, lr=0, weight_decay=0)
     
@@ -181,7 +185,6 @@ def main():
     scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [linear_warmup_scheduler, cosine_scheduler], milestones=[args.warmup_epochs*len(train_loader)])
 
     ### Define criterions
-    # criterion_CE = torch.nn.CrossEntropyLoss()
     criterion_MSE = torch.nn.MSELoss()
 
     ### Save one batch for plot purposes
@@ -214,20 +217,20 @@ def main():
         ### Train STEP ###
         ##################
 
-        train_loss_CE = MetricLogger('Train Loss CE')
+        train_loss_BCE = MetricLogger('Train Loss BCE')
         train_loss_MSE_1 = MetricLogger('Train Loss MSE 1')
         train_loss_MSE_2 = MetricLogger('Train Loss MSE 2')
         train_loss_MSE_total = MetricLogger('Train Loss MSE Total')
         train_loss_total = MetricLogger('Train Loss Total')
-        train_top1 = MetricLogger('Train Top1 ACC')
-        train_top5 = MetricLogger('Train Top5 ACC')
+        train_acc1 = MetricLogger('Train Top1 ACC')
+        train_acc5 = MetricLogger('Train Top5 ACC')
 
         view_encoder.train()
         action_encoder.train()
         seek.train()
         # bind.train()
         generator.train()
-        # classifier.train()
+        classifier.train()
 
         for i, (batch_episodes, batch_labels) in enumerate(train_loader):
             batch_episodes_imgs = batch_episodes[0] # (B, V, C, H, W)
@@ -255,24 +258,27 @@ def main():
             flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D)
             noflat_PRED2_imgfttoks = flat_PRED2_imgfttoks.view(B, V, flat_PRED2_imgfttoks.size(1), -1) # (B, V, Timg, Dimg)
 
+            # Classifier forward pass
+            flat_logits = classifier(flat_imgfttoks) # (B*V, K)
+
             with fabric.autocast(): # Run losses calculations in mixed precision (models already run in mixed precision)
                 # Reconstruction losses in latent space
                 noflat_imgfttoks_detach = noflat_imgfttoks.detach()
                 loss_mse_1 = criterion_MSE(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_detach[:, :, mask_indices, :])
                 loss_mse_2 = criterion_MSE(noflat_PRED2_imgfttoks, noflat_imgfttoks_detach)
 
-                # CE loss
-                # flat_clstok= noflat_clstok.reshape(B*V, noflat_clstok.size(2), -1).squeeze(1) # (B*V, D)
-                # flat_logits = classifier(flat_clstok)
-                # flat_labels = batch_episodes_labels.reshape(-1) # (B*V,)
-                # loss_ce = criterion_CE(flat_logits, flat_labels)
+                # BCE loss
+                flat_labels = batch_episodes_labels.reshape(-1) # (B*V,)
+                flat_labels_onehot = F.one_hot(flat_labels, num_classes=args.num_classes).float() # (B*V, K)
+                pos_weight = torch.full((args.num_classes,), fill_value=args.num_classes-1, dtype=torch.float32, device=flat_logits.device) # Weight for the positive class
+                loss_bce = F.binary_cross_entropy_with_logits(flat_logits, flat_labels_onehot, pos_weight=pos_weight)
 
                 # Calculate Total loss for the batch
                 loss_mse_total = loss_mse_1 + loss_mse_2
-                loss_total = loss_mse_total # + loss_ce
+                loss_total = args.coeff_mse * loss_mse_total + args.coeff_bce * loss_bce
 
-                # Classification accuracy
-                # acc1, acc5 = accuracy(flat_logits, flat_labels, topk=(1, 5))
+                # Classification accuracy (works for a non multi-label classification task)
+                acc1, acc5 = accuracy(flat_logits, flat_labels, topk=(1, 5))
 
             ## Backward pass with clip norm
             optimizer.zero_grad()
@@ -282,7 +288,7 @@ def main():
             fabric.clip_gradients(seek, optimizer, max_norm=1.0)
             # fabric.clip_gradients(view_encoder, optimizer, max_norm=1.0)
             fabric.clip_gradients(generator, optimizer, max_norm=1.0)
-            # fabric.clip_gradients(classifier, optimizer, max_norm=1.0)
+            fabric.clip_gradients(classifier, optimizer, max_norm=1.0)
             optimizer.step()
 
             ## Update scheduler
@@ -292,50 +298,52 @@ def main():
             B_allranks = fabric.all_reduce(torch.tensor(B, device=fabric.device), reduce_op="sum").item()
             train_loss_total.update(fabric.all_reduce(loss_total.detach(), reduce_op="mean").item(), B_allranks)
             train_loss_MSE_total.update(fabric.all_reduce(loss_mse_total.detach(), reduce_op="mean").item(), B_allranks)
-            # train_loss_CE.update(fabric.all_reduce(loss_ce.detach(), reduce_op="mean").item(), B_allranks)
+            train_loss_BCE.update(fabric.all_reduce(loss_bce.detach(), reduce_op="mean").item(), B_allranks)
             train_loss_MSE_1.update(fabric.all_reduce(loss_mse_1.detach(), reduce_op="mean").item(), B_allranks)
             train_loss_MSE_2.update(fabric.all_reduce(loss_mse_2.detach(), reduce_op="mean").item(), B_allranks)
-            # train_top1.update(fabric.all_reduce(acc1.detach(), reduce_op="mean").item(), B_allranks)
-            # train_top5.update(fabric.all_reduce(acc5.detach(), reduce_op="mean").item(), B_allranks)
+            train_acc1.update(fabric.all_reduce(acc1.detach(), reduce_op="mean").item(), B_allranks)
+            train_acc5.update(fabric.all_reduce(acc5.detach(), reduce_op="mean").item(), B_allranks)
 
             ## Log and print training metrics per batch
             if fabric.is_global_zero and ((i % args.print_frequency) == 0):
                 fabric.log(name=f'lr', value=scheduler.get_last_lr()[0], step=epoch*len(train_loader)+i)
+                fabric.log(name=f'lr_classifier', value=scheduler.get_last_lr()[4], step=epoch*len(train_loader)+i)
                 fabric.log(name=f'Loss Total', value=train_loss_total.val, step=epoch*len(train_loader)+i)
                 fabric.log(name=f'Loss MSE Total', value=train_loss_MSE_total.val, step=epoch*len(train_loader)+i)
-                # fabric.log(name=f'Loss CE', value=train_loss_CE.val, step=epoch*len(train_loader)+i)
+                fabric.log(name=f'Loss BCE', value=train_loss_BCE.val, step=epoch*len(train_loader)+i)
                 fabric.log(name=f'Loss MSE 1', value=train_loss_MSE_1.val, step=epoch*len(train_loader)+i)
                 fabric.log(name=f'Loss MSE 2', value=train_loss_MSE_2.val, step=epoch*len(train_loader)+i)
-                # fabric.log(name=f'Top1 ACC', value=train_top1.val, step=epoch*len(train_loader)+i)
-                # fabric.log(name=f'Top5 ACC', value=train_top5.val, step=epoch*len(train_loader)+i)
+                fabric.log(name=f'Top1 ACC', value=train_acc1.val, step=epoch*len(train_loader)+i)
+                fabric.log(name=f'Top5 ACC', value=train_acc5.val, step=epoch*len(train_loader)+i)
                 fabric.print(
                     f'Epoch [{epoch}] [{i}/{len(train_loader)}] -- '
                     f'lr: {scheduler.get_last_lr()[0]:.6f} -- '
+                    f'lr_classifier: {scheduler.get_last_lr()[4]:.6f} -- '
                     f'Loss Total: {train_loss_total.val:.6f} -- ' 
                     f'Loss MSE Total: {train_loss_MSE_total.val:.6f} -- '
-                    # f'Loss CE: {train_loss_CE.val:.6f} -- '
+                    f'Loss BCE: {train_loss_BCE.val:.6f} -- '
                     f'Loss MSE 1: {train_loss_MSE_1.val:.6f} -- '
                     f'Loss MSE 2: {train_loss_MSE_2.val:.6f} -- '
-                    # f'Top1 ACC: {train_top1.val:.3f} -- '
-                    # f'Top5 ACC: {train_top5.val:.3f}'
+                    f'Top1 ACC: {train_acc1.val:.3f} -- '
+                    f'Top5 ACC: {train_acc5.val:.3f}'
                     )
 
         ## Log and print training metrics per epoch
         fabric.log(name=f'Loss Total (per epoch)', value=train_loss_total.avg, step=epoch)
         fabric.log(name=f'Loss MSE Total (per epoch)', value=train_loss_MSE_total.avg, step=epoch)
-        # fabric.log(name=f'Loss CE (per epoch)', value=train_loss_CE.avg, step=epoch)
+        fabric.log(name=f'Loss BCE (per epoch)', value=train_loss_BCE.avg, step=epoch)
         fabric.log(name=f'Loss MSE 1 (per epoch)', value=train_loss_MSE_1.avg, step=epoch)
         fabric.log(name=f'Loss MSE 2 (per epoch)', value=train_loss_MSE_2.avg, step=epoch)
-        # fabric.log(name=f'Top1 ACC (per epoch)', value=train_top1.avg, step=epoch)
-        # fabric.log(name=f'Top5 ACC (per epoch)', value=train_top5.avg, step=epoch)
+        fabric.log(name=f'Top1 ACC (per epoch)', value=train_acc1.avg, step=epoch)
+        fabric.log(name=f'Top5 ACC (per epoch)', value=train_acc5.avg, step=epoch)
         fabric.print(
             f'Epoch [{epoch}] Train --> Loss Total: {train_loss_total.avg:.6f} -- '
             f'Loss MSE Total: {train_loss_MSE_total.avg:.6f} -- '
-            # f'Loss CE: {train_loss_CE.avg:.6f} -- '
+            f'Loss BCE: {train_loss_BCE.avg:.6f} -- '
             f'Loss MSE 1: {train_loss_MSE_1.avg:.6f} -- '
             f'Loss MSE 2: {train_loss_MSE_2.avg:.6f} -- '
-            # f'Top1 ACC: {train_top1.avg:.3f} -- '
-            # f'Top5 ACC: {train_top5.avg:.3f}'
+            f'Top1 ACC: {train_acc1.avg:.3f} -- '
+            f'Top5 ACC: {train_acc5.avg:.3f}'
             )
 
         ## Wait for all processes to finish the training step
@@ -347,20 +355,20 @@ def main():
         ### Validation STEP ###
         #######################
 
-        # val_loss_CE = MetricLogger('Val Loss CE')
+        val_loss_BCE = MetricLogger('Val Loss BCE')
         val_loss_MSE_1 = MetricLogger('Val Loss MSE 1')
         val_loss_MSE_2 = MetricLogger('Val Loss MSE 2')
         val_loss_MSE_total = MetricLogger('Val Loss MSE Total')
         val_loss_total = MetricLogger('Val Loss Total')
-        # val_top1 = MetricLogger('Val Top1 ACC')
-        # val_top5 = MetricLogger('Val Top5 ACC')
+        val_acc1 = MetricLogger('Val Top1 ACC')
+        val_acc5 = MetricLogger('Val Top5 ACC')
 
         view_encoder.eval()
         action_encoder.eval()
         seek.eval()
         # bind.eval()
         generator.eval()
-        # classifier.eval()
+        classifier.eval()
 
         with torch.no_grad():
             for j, (batch_episodes, batch_labels) in enumerate(val_loader):
@@ -389,51 +397,54 @@ def main():
                 flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D)
                 noflat_PRED2_imgfttoks = flat_PRED2_imgfttoks.view(B, V, flat_PRED2_imgfttoks.size(1), -1) # (B, V, Timg, Dimg)
 
+                # Classifier forward pass
+                flat_logits = classifier(flat_imgfttoks) # (B*V, K)
+
                 with fabric.autocast(): # Run losses calculations in mixed precision (models already run in mixed precision)
                     # Reconstruction losses in latent space
                     noflat_imgfttoks_detach = noflat_imgfttoks #.detach() No need to detach because it is for validation with torch.no_grad()
                     loss_mse_1 = criterion_MSE(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_detach[:, :, mask_indices, :])
                     loss_mse_2 = criterion_MSE(noflat_PRED2_imgfttoks, noflat_imgfttoks_detach)
 
-                    # CE loss
-                    # flat_clstok= noflat_clstok.reshape(B*V, noflat_clstok.size(2), -1).squeeze(1) # (B*V, D)
-                    # flat_logits = classifier(flat_clstok)
-                    # flat_labels = batch_episodes_labels.reshape(-1) # (B*V,)
-                    # loss_ce = criterion_CE_val(flat_logits, flat_labels)
+                    # BCE loss
+                    flat_labels = batch_episodes_labels.reshape(-1) # (B*V,)
+                    flat_labels_onehot = F.one_hot(flat_labels, num_classes=args.num_classes).float() # (B*V, K)
+                    pos_weight = torch.full((args.num_classes,), fill_value=args.num_classes-1, dtype=torch.float32, device=flat_logits.device) # Weight for the positive class
+                    loss_bce = F.binary_cross_entropy_with_logits(flat_logits, flat_labels_onehot, pos_weight=pos_weight)
 
                     # Calculate Total loss for the batch
                     loss_mse_total = loss_mse_1 + loss_mse_2
-                    loss_total = loss_mse_total #+ loss_ce
+                    loss_total = args.coeff_mse * loss_mse_total + args.coeff_bce * loss_bce
 
                     # Classification accuracy
-                    # acc1, acc5 = accuracy(flat_logits, flat_labels, topk=(1, 5))
+                    acc1, acc5 = accuracy(flat_logits, flat_labels, topk=(1, 5))
 
                 ## Track metrics
                 B_allranks = fabric.all_reduce(torch.tensor(B, device=fabric.device), reduce_op="sum").item()
                 val_loss_total.update(fabric.all_reduce(loss_total.detach(), reduce_op="mean").item(), B_allranks)
                 val_loss_MSE_total.update(fabric.all_reduce(loss_mse_total.detach(), reduce_op="mean").item(), B_allranks)
-                # val_loss_CE.update(fabric.all_reduce(loss_ce.detach(), reduce_op="mean").item(), B_allranks)
+                val_loss_BCE.update(fabric.all_reduce(loss_bce.detach(), reduce_op="mean").item(), B_allranks)
                 val_loss_MSE_1.update(fabric.all_reduce(loss_mse_1.detach(), reduce_op="mean").item(), B_allranks)
                 val_loss_MSE_2.update(fabric.all_reduce(loss_mse_2.detach(), reduce_op="mean").item(), B_allranks)
-                # val_top1.update(fabric.all_reduce(acc1.detach(), reduce_op="mean").item(), B_allranks)
-                # val_top5.update(fabric.all_reduce(acc5.detach(), reduce_op="mean").item(), B_allranks)
+                val_acc1.update(fabric.all_reduce(acc1.detach(), reduce_op="mean").item(), B_allranks)
+                val_acc5.update(fabric.all_reduce(acc5.detach(), reduce_op="mean").item(), B_allranks)
 
         ## Log and print validation metrics per epoch
         fabric.log(name=f'Val Loss Total (per epoch)', value=val_loss_total.avg, step=epoch)
         fabric.log(name=f'Val Loss MSE Total (per epoch)', value=val_loss_MSE_total.avg, step=epoch)
-        # fabric.log(name=f'Val Loss CE (per epoch)', value=val_loss_CE.avg, step=epoch)
+        fabric.log(name=f'Val Loss BCE (per epoch)', value=val_loss_BCE.avg, step=epoch)
         fabric.log(name=f'Val Loss MSE 1 (per epoch)', value=val_loss_MSE_1.avg, step=epoch)
         fabric.log(name=f'Val Loss MSE 2 (per epoch)', value=val_loss_MSE_2.avg, step=epoch)
-        # fabric.log(name=f'Val Top1 ACC (per epoch)', value=val_top1.avg, step=epoch)
-        # fabric.log(name=f'Val Top5 ACC (per epoch)', value=val_top5.avg, step=epoch)
+        fabric.log(name=f'Val Top1 ACC (per epoch)', value=val_acc1.avg, step=epoch)
+        fabric.log(name=f'Val Top5 ACC (per epoch)', value=val_acc5.avg, step=epoch)
         fabric.print(
                 f'Epoch [{epoch}] Val --> Loss Total: {val_loss_total.avg:.6f} -- '
                 f'Loss MSE Total: {val_loss_MSE_total.avg:.6f} -- '
-                # f'Loss CE: {val_loss_CE.avg:.6f} -- '
+                f'Loss BCE: {val_loss_BCE.avg:.6f} -- '
                 f'Loss MSE 1: {val_loss_MSE_1.avg:.6f} -- '
                 f'Loss MSE 2: {val_loss_MSE_2.avg:.6f} -- '
-                # f'Top1 ACC: {val_top1.avg:.3f} -- '
-                # f'Top5 ACC: {val_top5.avg:.3f}'
+                f'Top1 ACC: {val_acc1.avg:.3f} -- '
+                f'Top5 ACC: {val_acc5.avg:.3f}'
             )
 
         ## Wait for all processes to finish the validation step
@@ -447,7 +458,7 @@ def main():
                 "seek": seek,
                 # "bind": bind,
                 "generator": generator,
-                # "classifier": classifier, 
+                "classifier": classifier, 
                 }
             fabric.save(os.path.join(args.save_dir, f'models_checkpoint_epoch{epoch}.pth'), state=state)
 
@@ -463,7 +474,6 @@ def main():
                 seek.eval()
                 # bind.eval()
                 generator.eval()
-                # classifier.eval()
                 N = PLOT_N
                 episodes_plot_imgs = episodes_plot[0][:N] # (N, V, C, H, W)
                 episodes_plot_actions = episodes_plot[1][:N] # (N, V, A)
