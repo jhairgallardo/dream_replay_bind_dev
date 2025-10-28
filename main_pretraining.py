@@ -50,7 +50,7 @@ parser.add_argument('--seek_dropout', type=float, default=0)
 # Generator parameters
 parser.add_argument('--gen_num_Blocks', type=list, default=[1,1,1,1])
 # Classifier parameters
-parser.add_argument('--lr_classifier', type=float, default=0.003)
+parser.add_argument('--lr_classifier', type=float, default=0.01)
 parser.add_argument('--wd_classifier', type=float, default=0)
 # Training parameters
 parser.add_argument('--lr', type=float, default=0.0008)
