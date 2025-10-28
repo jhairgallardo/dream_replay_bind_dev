@@ -83,7 +83,7 @@ def main():
     fabric.launch()
 
     ### Seed everything
-    fabric.seed_everything(args.seed + fabric.local_rank)
+    fabric.seed_everything(args.seed)
 
     ### Print args
     fabric.print(args)
@@ -185,7 +185,7 @@ def main():
     criterion_MSE = torch.nn.MSELoss()
 
     ### Save one batch for plot purposes
-    fabric.seed_everything(args.seed + fabric.local_rank)  # Reset seed to ensure reproducibility for the plot batch
+    fabric.seed_everything(args.seed)  # Reset seed to ensure reproducibility for the plot batch
     if fabric.is_global_zero:
         PLOT_N = 8
         plot_indices = build_stratified_indices(val_dataset, PLOT_N)
