@@ -23,14 +23,10 @@ class Classifier_Network(torch.nn.Module):
         # Normalization and temperature
         self.tau = 0.07 # temperature for cosine softmax # 0.1
 
-        # Bias
-        self.bias = nn.Parameter(torch.zeros(K))
-
     def forward(self, canvas):
         # shape of canvas is (B, S, D), where S is M^2 (M is grid size)
         # 1) Positive negative prototype classification head to go from (B, S, D) to (B, S, K)
         # 2) smoothmax pooling to go from (B, S, K) to (B, K)
-        # 3) add bias to the pooled logits
         B, S, D = canvas.shape
 
         # Normalize canvas
@@ -46,10 +42,5 @@ class Classifier_Network(torch.nn.Module):
         # Smoothmax pooling 
         # It needs shape (B, K, S) as input. 
         pooled_logits = smoothmax(canvas_logits, normalize=True) # (B, K)
-
-        # Add bias
-        # Optional but handy: add a per-class bias after pooling 
-        # (a learnable b_k added to pooled_logits) to absorb priors; it plays nicely with BCE.
-        pooled_logits = pooled_logits + self.bias
 
         return pooled_logits
