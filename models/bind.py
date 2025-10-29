@@ -59,6 +59,10 @@ class Bind_Network(nn.Module):
         self.canvas_queries = nn.Parameter(torch.zeros(num_queries, self.hidden_dim))
         trunc_normal_(self.canvas_queries, std=0.02)
 
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'canvas_queries'}
+
     def convert_ret2d_to_glo2d(self, noflat_ret2D, noflat_raw_actions):
         """
         Inputs:

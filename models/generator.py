@@ -80,6 +80,10 @@ class Generator_Network(nn.Module):
             self.in_planes = planes
         return nn.Sequential(*layers)
 
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {}
+
     def forward(self, x):
         # Input x is shape (B, V, Timg, Dimg)
         B, V, Timg, Dimg = x.shape

@@ -15,7 +15,7 @@ from models.bind import Bind_Network
 from models.generator import Generator_Network
 from models.classifier import Classifier_Network
 
-from utils import MetricLogger, accuracy, time_duration_print, build_stratified_indices, make_plot_batch
+from utils import MetricLogger, accuracy, time_duration_print, build_stratified_indices, make_plot_batch, make_param_group
 
 import numpy as np
 import json
@@ -183,14 +183,14 @@ def main():
     classifier = fabric.setup_module(classifier)
 
     ### Define optimizers
-    param_groups = [
-                    {'params': view_encoder.parameters(), 'lr': args.lr_venc, 'weight_decay': args.wd_venc},
-                    {'params': action_encoder.parameters(), 'lr': args.lr_act_enc, 'weight_decay': args.wd_act_enc},
-                    {'params': seek.parameters(), 'lr': args.lr_seek, 'weight_decay': args.wd_seek},
-                    {'params': bind.parameters(), 'lr': args.lr_bind, 'weight_decay': args.wd_bind},
-                    {'params': generator.parameters(), 'lr': args.lr_gen, 'weight_decay': args.wd_gen},
-                    {'params': classifier.parameters(), 'lr': args.lr_classifier, 'weight_decay': args.wd_classifier},
-                    ]
+    view_encoder_param_group = make_param_group(view_encoder, lr=args.lr_venc, weight_decay=args.wd_venc, no_weight_decay_list=getattr(view_encoder, "no_weight_decay", lambda: set())())
+    action_encoder_param_group = make_param_group(action_encoder, lr=args.lr_act_enc, weight_decay=args.wd_act_enc, no_weight_decay_list=getattr(action_encoder, "no_weight_decay", lambda: set())())
+    seek_param_group = make_param_group(seek, lr=args.lr_seek, weight_decay=args.wd_seek, no_weight_decay_list=getattr(seek, "no_weight_decay", lambda: set())())
+    bind_param_group = make_param_group(bind, lr=args.lr_bind, weight_decay=args.wd_bind, no_weight_decay_list=getattr(bind, "no_weight_decay", lambda: set())())
+    generator_param_group = make_param_group(generator, lr=args.lr_gen, weight_decay=args.wd_gen, no_weight_decay_list=getattr(generator, "no_weight_decay", lambda: set())())
+    classifier_param_group = make_param_group(classifier, lr=args.lr_classifier, weight_decay=args.wd_classifier, no_weight_decay_list=getattr(classifier, "no_weight_decay", lambda: set())())
+    
+    param_groups = view_encoder_param_group + action_encoder_param_group + seek_param_group + bind_param_group + generator_param_group + classifier_param_group
     optimizer = torch.optim.AdamW(param_groups, lr=0, weight_decay=0)
     
     ### Setup optimizers
@@ -332,11 +332,6 @@ def main():
                 fabric.log(name=f'Top1 ACC', value=train_acc1.val, step=epoch*len(train_loader)+i)
                 fabric.log(name=f'Top5 ACC', value=train_acc5.val, step=epoch*len(train_loader)+i)
                 fabric.log(name=f'lr_venc', value=scheduler.get_last_lr()[0], step=epoch*len(train_loader)+i)
-                fabric.log(name=f'lr_act_enc', value=scheduler.get_last_lr()[1], step=epoch*len(train_loader)+i)
-                fabric.log(name=f'lr_seek', value=scheduler.get_last_lr()[2], step=epoch*len(train_loader)+i)
-                fabric.log(name=f'lr_bind', value=scheduler.get_last_lr()[3], step=epoch*len(train_loader)+i)
-                fabric.log(name=f'lr_gen', value=scheduler.get_last_lr()[4], step=epoch*len(train_loader)+i)
-                fabric.log(name=f'lr_classifier', value=scheduler.get_last_lr()[5], step=epoch*len(train_loader)+i)
                 fabric.print(
                     f'Epoch [{epoch}] [{i}/{len(train_loader)}] -- '
                     f'Loss Total: {train_loss_total.val:.6f} -- ' 
@@ -346,12 +341,7 @@ def main():
                     f'Loss MSE 2: {train_loss_MSE_2.val:.6f} -- '
                     f'Top1 ACC: {train_acc1.val:.3f} -- '
                     f'Top5 ACC: {train_acc5.val:.3f} -- '
-                    f'lr_venc: {scheduler.get_last_lr()[0]:.6f} -- '
-                    f'lr_act_enc: {scheduler.get_last_lr()[1]:.6f} -- '
-                    f'lr_seek: {scheduler.get_last_lr()[2]:.6f} -- '
-                    f'lr_bind: {scheduler.get_last_lr()[3]:.6f} -- '
-                    f'lr_gen: {scheduler.get_last_lr()[4]:.6f} -- '
-                    f'lr_classifier: {scheduler.get_last_lr()[5]:.6f}'
+                    f'lr_venc: {scheduler.get_last_lr()[0]:.6f}'
                     )
 
         ## Log and print training metrics per epoch

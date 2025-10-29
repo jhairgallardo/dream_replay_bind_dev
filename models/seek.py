@@ -67,6 +67,10 @@ class Seek_Network(nn.Module):
         self.type_emb_mask_retpatchtok = nn.Parameter(torch.zeros(self.hidden_dim))
         trunc_normal_(self.type_emb_mask_retpatchtok, std=0.02)
 
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {}
+
     def forward(self, noflat_acttok, noflat_imgfttoks, noflat_ret2D):
         """
         Inputs:

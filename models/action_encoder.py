@@ -135,6 +135,11 @@ class Action_Encoder_Network(nn.Module):
             embed_dim=d_model, num_heads=4, batch_first=True
         )
 
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        names = {"pool_q", "aug_tokeniser.type_emb.weight", "aug_tokeniser.pad_emb"}
+        return names
+
     def forward(self, actions):
         # Actions are (B*V, A)
         N = len(actions) # N = B*V

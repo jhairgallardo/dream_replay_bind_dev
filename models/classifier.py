@@ -23,6 +23,10 @@ class Classifier_Network(torch.nn.Module):
         # Normalization and temperature
         self.tau = 0.07 # temperature for cosine softmax # 0.1
 
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {}
+
     def forward(self, canvas):
         # shape of canvas is (B, S, D), where S is M^2 (M is grid size)
         # 1) Positive negative prototype classification head to go from (B, S, D) to (B, S, K)

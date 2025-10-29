@@ -8,6 +8,38 @@ import torchvision
 from PIL import Image
 from collections import defaultdict
 
+import torch.nn as nn
+
+def make_param_group(
+    module: nn.Module,
+    lr: float,
+    weight_decay: float,
+    no_weight_decay_list=()
+):
+    """
+    Build two param groups for AdamW:
+      - decay:   all params EXCEPT (ndim<=1, *.bias, names in no_weight_decay_list)
+      - no_decay: the excluded ones (weight_decay=0)
+    Matches timm.optim.optim_factory.param_groups_weight_decay behavior.
+    """
+    no_weight_decay_set = set(no_weight_decay_list)
+    decay, no_decay = [], []
+
+    for name, p in module.named_parameters():
+        if not p.requires_grad:
+            continue
+        if (p.ndim <= 1) or name.endswith(".bias") or (name in no_weight_decay_set):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+
+    groups = []
+    if no_decay:
+        groups.append({"params": no_decay, "lr": lr, "weight_decay": 0.0})
+    if decay:
+        groups.append({"params": decay, "lr": lr, "weight_decay": weight_decay})
+    return groups
+
 def build_stratified_indices(dataset, k):
     """Round-robin pick across classes to cover diverse labels deterministically."""
     # torchvision ImageFolder provides dataset.targets aligned with dataset.samples
