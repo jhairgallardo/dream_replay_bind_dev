@@ -21,7 +21,7 @@ class Classifier_Network(torch.nn.Module):
         self.mu_neg = nn.Parameter(F.normalize(torch.randn(K, input_dim), dim=-1))
 
         # Normalization and temperature
-        self.tau = 0.15 #0.07 # temperature for cosine softmax # 0.1
+        self.tau = 0.1 #0.15 #0.07 # temperature for cosine softmax # 0.1
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -45,6 +45,6 @@ class Classifier_Network(torch.nn.Module):
 
         # Smoothmax pooling 
         # It needs shape (B, K, S) as input. 
-        pooled_logits = smoothmax(canvas_logits, T=2.0, normalize=True) # (B, K)
+        pooled_logits = smoothmax(canvas_logits, T=4.0, normalize=True) # (B, K)
 
         return pooled_logits
