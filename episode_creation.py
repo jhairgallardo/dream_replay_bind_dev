@@ -283,7 +283,7 @@ class Episode_Transformations:
                 r_norm = 0.0 if R_hd == 0 else (R / R_hd)
                 r_norm = _clamp(r_norm, 0.0, 1.0) # Clamp just in case of tiny FP overshoot
             else: # Get crop for the center of the image
-                zoom = random.uniform(0.7, 0.8) #self._sample_zoom()#random.uniform(0.7, 0.8) #0.8 #self._sample_zoom()
+                zoom = self._sample_zoom() #random.uniform(0.7, 0.8) #0.8 #self._sample_zoom()
                 sin_th, cos_th = 0.0, 1.0
                 side_px = _zoom_to_side_px(zoom, W, H)
                 R = 0.0
@@ -398,9 +398,9 @@ class Episode_Transformations:
                 view, action_cropbb, crop_flag = self._random_crop_image(base_img, self.p_crop, fix_center_crop = True)
                 if crop_flag:
                     view_actions.append(("crop", action_cropbb))
-                views[i] = self.normalize(self.totensor(view))
-                actions.append(view_actions)
-                continue
+                # views[i] = self.normalize(self.totensor(view))
+                # actions.append(view_actions)
+                # continue
             else: # other views: random crop
                 view, action_cropbb, crop_flag = self._random_crop_image(base_img, self.p_crop)
                 if crop_flag:
