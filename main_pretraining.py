@@ -70,7 +70,7 @@ parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--warmup_epochs', type=int, default=5)
 parser.add_argument('--episode_batch_size', type=int, default=80)
 parser.add_argument('--num_views', type=int, default=4)
-parser.add_argument('--coeff_mse', type=float, default=1.0) # Not MSE for now (0.0). Check BCE so you can check if Bind is learning something
+parser.add_argument('--coeff_mse', type=float, default=2.0)
 parser.add_argument('--coeff_bce', type=float, default=1.0)
 # Other parameters
 parser.add_argument('--workers', type=int, default=32)
