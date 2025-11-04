@@ -191,9 +191,9 @@ class Episode_Transformations:
         geom_size: int = 224,            # we compute geometry on a 224×224 canvas (your spec)
         mean: List[float] = [0.5, 0.5, 0.5],
         std:  List[float] = [0.5, 0.5, 0.5],
-        zoom_range: Tuple[float, float] = (0.2, 1.0), #(0.08, 0.8),
+        zoom_range: Tuple[float, float] = (0.0625, 0.5), #(0.0625, 0.25), #(0.2, 1.0), #(0.08, 0.8),
         interpolation=transforms.InterpolationMode.BILINEAR,
-        p_crop: float = 0.9,
+        p_crop: float = 1.0,
         p_hflip: float = 0.5,
         p_color_jitter: float = 0.8,
         brightness: float = 0.4,
@@ -283,7 +283,7 @@ class Episode_Transformations:
                 r_norm = 0.0 if R_hd == 0 else (R / R_hd)
                 r_norm = _clamp(r_norm, 0.0, 1.0) # Clamp just in case of tiny FP overshoot
             else: # Get crop for the center of the image
-                zoom = self._sample_zoom() #random.uniform(0.7, 0.8) #0.8 #self._sample_zoom()
+                zoom = self._sample_zoom() #random.uniform(0.7, 1.0) #0.8 #self._sample_zoom()
                 sin_th, cos_th = 0.0, 1.0
                 side_px = _zoom_to_side_px(zoom, W, H)
                 R = 0.0
@@ -394,22 +394,23 @@ class Episode_Transformations:
             view_actions = []
 
             ## Crop
-            if i ==0: # First view (crop is always at the center of the image. No other augs)
+            if i ==0: # First view (crop is always at the center of the image. Any size)
                 view, action_cropbb, crop_flag = self._random_crop_image(base_img, self.p_crop, fix_center_crop = True)
                 if crop_flag:
                     view_actions.append(("crop", action_cropbb))
-                # views[i] = self.normalize(self.totensor(view))
-                # actions.append(view_actions)
-                # continue
+                # No other augs for the first view
+                views[i] = self.normalize(self.totensor(view))
+                actions.append(view_actions)
+                continue
             else: # other views: random crop
                 view, action_cropbb, crop_flag = self._random_crop_image(base_img, self.p_crop)
                 if crop_flag:
                     view_actions.append(("crop", action_cropbb))
 
-            ## Horizontal Flip 
-            view, action_horizontalflip, hflip_flag = self._apply_random_flip(view, self.p_hflip)
-            if hflip_flag:
-                view_actions.append(("hflip", torch.empty(0))) # param-less. Only needs type_emb later on.
+            # ## Horizontal Flip 
+            # view, action_horizontalflip, hflip_flag = self._apply_random_flip(view, self.p_hflip)
+            # if hflip_flag:
+            #     view_actions.append(("hflip", torch.empty(0))) # param-less. Only needs type_emb later on.
 
             ## ColorJitter
             view, action_colorjitter, jitter_flag = self._color_jitter(view, p_color_jitter = self.p_color_jitter, 
@@ -462,15 +463,7 @@ if __name__ == "__main__":
     import os
 
     NUM_VIEWS = 4
-    transform = Episode_Transformations(
-        num_views=NUM_VIEWS,
-        size=224,
-        geom_size=224,
-        mean=[0.5, 0.5, 0.5],
-        std=[0.5, 0.5, 0.5],
-        zoom_range=(0.08, 0.5),
-        interpolation=transforms.InterpolationMode.BILINEAR
-    )
+    transform = Episode_Transformations(num_views=NUM_VIEWS)
 
     # Try to load 'image.jpg'
     path = "plots/testing_episode_creation/image.png"
