@@ -48,7 +48,7 @@ parser.add_argument('--wd_seek', type=float, default=0)
 parser.add_argument('--seek_dim', type=int, default=192)
 parser.add_argument('--seek_n_layers', type=int, default=8)
 parser.add_argument('--seek_n_heads', type=int, default=8)
-parser.add_argument('--seek_dim_ff', type=int, default=1024)
+parser.add_argument('--seek_dim_ff', type=int, default=768) # 192*4
 parser.add_argument('--seek_dropout', type=float, default=0)
 ### Bind parameters
 parser.add_argument('--lr_bind', type=float, default=0.0008)
@@ -204,18 +204,31 @@ def main():
     ### Save one batch for plot purposes
     fabric.seed_everything(args.seed)  # Reset seed to ensure reproducibility for the plot batch
     if fabric.is_global_zero:
-        PLOT_N = 8
+        PLOT_N = 10
+        # Training batch
+        plot_indices = build_stratified_indices(train_dataset, PLOT_N)
+        episodes_plot_train, _ = make_plot_batch(train_dataset, plot_indices, collate_function_notaskid)
+        # Validation batch
         plot_indices = build_stratified_indices(val_dataset, PLOT_N)
-        episodes_plot, _ = make_plot_batch(val_dataset, plot_indices, collate_function_notaskid)
-        # Quickly plot the first episode to see if it is correct (not generated images, just plot directly the images)
-        episode_0_imgs = episodes_plot[0][0]
+        episodes_plot_val, _ = make_plot_batch(val_dataset, plot_indices, collate_function_notaskid)
+        # Train batch plot: Quickly plot the first episode to see if it is correct (not generated images, just plot directly the images)
+        episode_0_imgs = episodes_plot_train[0][0]
         episode_0_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_0_imgs]
         episode_0_imgs = torch.stack(episode_0_imgs, dim=0)
         grid = torchvision.utils.make_grid(episode_0_imgs, nrow=args.num_views)
         grid = grid.permute(1, 2, 0).cpu().numpy()
         grid = (grid * 255).astype(np.uint8)
         grid = Image.fromarray(grid)
-        grid.save(os.path.join(args.save_dir, 'episode_0_imgs.png'))
+        grid.save(os.path.join(args.save_dir, 'episode_0_imgs_train.png'))
+        # Validation batch plot: Quickly plot the first episode to see if it is correct (not generated images, just plot directly the images)
+        episode_0_imgs = episodes_plot_val[0][0]
+        episode_0_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_0_imgs]
+        episode_0_imgs = torch.stack(episode_0_imgs, dim=0)
+        grid = torchvision.utils.make_grid(episode_0_imgs, nrow=args.num_views)
+        grid = grid.permute(1, 2, 0).cpu().numpy()
+        grid = (grid * 255).astype(np.uint8)
+        grid = Image.fromarray(grid)
+        grid.save(os.path.join(args.save_dir, 'episode_0_imgs_val.png'))
     fabric.barrier()
 
 
@@ -490,26 +503,24 @@ def main():
                 seek.eval()
                 generator.eval()
                 N = PLOT_N
-                episodes_plot_imgs = episodes_plot[0][:N] # (N, V, C, H, W)
-                episodes_plot_actions = episodes_plot[1][:N] # (N, V, A)
+
+                ## Train batch plot
+                episodes_plot_imgs = episodes_plot_train[0][:N] # (N, V, C, H, W)
+                episodes_plot_actions = episodes_plot_train[1][:N] # (N, V, A)
                 _, V, C, H, W = episodes_plot_imgs.shape
                 with torch.no_grad():
                     # View Encoder forward pass
                     flat_imgfttoks, flat_ret2D = view_encoder(episodes_plot_imgs.reshape(N * V, C, H, W))
                     noflat_imgfttoks = flat_imgfttoks.reshape(N, V, flat_imgfttoks.size(1), -1) # (N, V, Timg, Dimg)
                     noflat_ret2D = flat_ret2D.reshape(N, V, flat_ret2D.size(1), -1) # (N, V, Timg, 2)
-
                     # Action Encoder forward pass
                     flat_actions = [episodes_plot_actions[b][v] for b in range(N) for v in range(V)] # list length N*V
                     flat_acttok = action_encoder(flat_actions) # (N*V, 1, D)
                     noflat_acttok = flat_acttok.view(N, V, flat_acttok.size(1), -1) # (N, V, 1, D)
-
                     # Seek forward pass
                     noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D) # (N, V, Timg, Dimg), (Timg)
-
                     # Generator forward pass
                     noflat_PRED_imgs = generator(noflat_PRED_imgfttoks) # (N, V, C, H, W)
-                    
                 episodes_plot_gen_imgs = noflat_PRED_imgs.detach().cpu() # (N, V, C, H, W)
                 episodes_plot_imgs = episodes_plot_imgs.detach().cpu() # (N, V, C, H, W)
                 # plot each episode
@@ -517,18 +528,55 @@ def main():
                     episode_i_imgs = episodes_plot_imgs[i]
                     episode_i_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_i_imgs]
                     episode_i_imgs = torch.stack(episode_i_imgs, dim=0) # (V, C, H, W)
-
                     episode_i_gen_imgs = episodes_plot_gen_imgs[i]
                     episode_i_gen_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_i_gen_imgs]
                     episode_i_gen_imgs = torch.stack(episode_i_gen_imgs, dim=0) # (V, C, H, W)
                     episode_i_gen_imgs = torch.clamp(episode_i_gen_imgs, 0, 1) # Clip values to [0, 1]
-
                     grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs], dim=0), nrow=args.num_views)
                     grid = grid.permute(1, 2, 0).cpu().numpy()
                     grid = (grid * 255).astype(np.uint8)
                     grid = Image.fromarray(grid)
                     image_name = f'epoch{epoch}_episode{i}.png'
-                    save_plot_dir = os.path.join(args.save_dir, 'gen_plots')
+                    save_plot_dir = os.path.join(args.save_dir, 'gen_plots_train')
+                    # create folder if it doesn't exist
+                    if not os.path.exists(save_plot_dir):
+                        os.makedirs(save_plot_dir)
+                    grid.save(os.path.join(save_plot_dir, image_name))
+
+                ## Validation batch plot
+                episodes_plot_imgs = episodes_plot_val[0][:N] # (N, V, C, H, W)
+                episodes_plot_actions = episodes_plot_val[1][:N] # (N, V, A)
+                _, V, C, H, W = episodes_plot_imgs.shape
+                with torch.no_grad():
+                    # View Encoder forward pass
+                    flat_imgfttoks, flat_ret2D = view_encoder(episodes_plot_imgs.reshape(N * V, C, H, W))
+                    noflat_imgfttoks = flat_imgfttoks.reshape(N, V, flat_imgfttoks.size(1), -1) # (N, V, Timg, Dimg)
+                    noflat_ret2D = flat_ret2D.reshape(N, V, flat_ret2D.size(1), -1) # (N, V, Timg, 2)
+                    # Action Encoder forward pass
+                    flat_actions = [episodes_plot_actions[b][v] for b in range(N) for v in range(V)] # list length N*V
+                    flat_acttok = action_encoder(flat_actions) # (N*V, 1, D)
+                    noflat_acttok = flat_acttok.view(N, V, flat_acttok.size(1), -1) # (N, V, 1, D)
+                    # Seek forward pass
+                    noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D) # (N, V, Timg, Dimg), (Timg)
+                    # Generator forward pass
+                    noflat_PRED_imgs = generator(noflat_PRED_imgfttoks) # (N, V, C, H, W)
+                episodes_plot_gen_imgs = noflat_PRED_imgs.detach().cpu() # (N, V, C, H, W)
+                episodes_plot_imgs = episodes_plot_imgs.detach().cpu() # (N, V, C, H, W)
+                # plot each episode
+                for i in range(N):
+                    episode_i_imgs = episodes_plot_imgs[i]
+                    episode_i_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_i_imgs]
+                    episode_i_imgs = torch.stack(episode_i_imgs, dim=0) # (V, C, H, W)
+                    episode_i_gen_imgs = episodes_plot_gen_imgs[i]
+                    episode_i_gen_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_i_gen_imgs]
+                    episode_i_gen_imgs = torch.stack(episode_i_gen_imgs, dim=0) # (V, C, H, W)
+                    episode_i_gen_imgs = torch.clamp(episode_i_gen_imgs, 0, 1) # Clip values to [0, 1]
+                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs], dim=0), nrow=args.num_views)
+                    grid = grid.permute(1, 2, 0).cpu().numpy()
+                    grid = (grid * 255).astype(np.uint8)
+                    grid = Image.fromarray(grid)
+                    image_name = f'epoch{epoch}_episode{i}.png'
+                    save_plot_dir = os.path.join(args.save_dir, 'gen_plots_val')
                     # create folder if it doesn't exist
                     if not os.path.exists(save_plot_dir):
                         os.makedirs(save_plot_dir)
