@@ -30,20 +30,24 @@ class AugTokenizerSparse(nn.Module):
         self.d_linparam = d_linparam
         self.d = d_type_emb + d_linparam
         self.name2id = {
-            "crop": 0, "hflip": 1, "jitter": 2,
-            "gray": 3, "blur": 4, "solar": 5,
-            "none": 6,                      # emitted when list is empty
+            "crop": 0, 
+            # "hflip": 1, 
+            "jitter": 1, #2,
+            "gray": 2, #3, 
+            "blur": 3, #4, 
+            "solar": 4, #5,
+            # "none": 5, #6,                      # emitted when list is empty
         }
         self.type_emb = nn.Embedding(len(self.name2id), d_type_emb)
 
         self.proj = nn.ModuleDict({
             "crop"  : nn.Linear(4, d_linparam), # process 4 params
-            "hflip" : None,                  # no params to process
+            # "hflip" : None,                  # no params to process
             "jitter": nn.Linear(7, d_linparam), # process 7 params
             "gray"  : None,                  # no params to process
             "blur"  : nn.Linear(1, d_linparam), # process 1 param
             "solar" : nn.Linear(1, d_linparam), # process 1 param
-            "none"  : None,                  # no params to process
+            # "none"  : None,                  # no params to process
         })
 
         self.pad_emb  = nn.Parameter(torch.zeros(1, self.d))   # <PAD>
