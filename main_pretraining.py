@@ -68,7 +68,7 @@ parser.add_argument('--wd_classifier', type=float, default=0)
 # Training parameters
 parser.add_argument('--epochs', type=int, default=100)
 parser.add_argument('--warmup_epochs', type=int, default=5)
-parser.add_argument('--episode_batch_size', type=int, default=80)
+parser.add_argument('--episode_batch_size', type=int, default=96)
 parser.add_argument('--num_views', type=int, default=4)
 parser.add_argument('--coeff_mse', type=float, default=2.0)
 parser.add_argument('--coeff_bce', type=float, default=1.0)
@@ -204,7 +204,7 @@ def main():
     ### Save one batch for plot purposes
     fabric.seed_everything(args.seed)  # Reset seed to ensure reproducibility for the plot batch
     if fabric.is_global_zero:
-        PLOT_N = 10
+        PLOT_N = 16
         # Training batch
         plot_indices = build_stratified_indices(train_dataset, PLOT_N)
         episodes_plot_train, _ = make_plot_batch(train_dataset, plot_indices, collate_function_notaskid)
