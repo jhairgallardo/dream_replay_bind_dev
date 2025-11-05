@@ -191,7 +191,7 @@ class Episode_Transformations:
         geom_size: int = 224,            # we compute geometry on a 224×224 canvas (your spec)
         mean: List[float] = [0.5, 0.5, 0.5],
         std:  List[float] = [0.5, 0.5, 0.5],
-        zoom_range: Tuple[float, float] = (0.0625, 0.5), #(0.0625, 0.25), #(0.2, 1.0), #(0.08, 0.8),
+        zoom_range: Tuple[float, float] = (0.2, 1.0), #(0.08, 0.8), #(0.0625, 0.25), #(0.2, 1.0), #(0.08, 0.8),
         interpolation=transforms.InterpolationMode.BILINEAR,
         p_crop: float = 1.0,
         p_hflip: float = 0.5,
