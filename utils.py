@@ -10,6 +10,28 @@ from collections import defaultdict
 
 import torch.nn as nn
 
+def extract_crop_params_from_raw(noflat_raw_actions, device):
+    """
+    Inputs:
+      noflat_raw_actions: list[list[list[(name:str, params:Tensor)]]], shape (B, V, A)
+    Returns:
+      crop_bv: (B, V, 4) tensor with (cosθ, sinθ, ρ, zoom)
+    """
+    B = len(noflat_raw_actions)
+    V = len(noflat_raw_actions[0]) if B > 0 else 0
+    out = torch.zeros(B, V, 4, device=device)
+    for b in range(B):
+        for v in range(V):
+            sin_th, cos_th, rho, zoom = 0.0, 1.0, 0.0, 1.0  # identity crop
+            for name, p in noflat_raw_actions[b][v]:
+                if name == "crop":
+                    # your crop tuple is (sin, cos, r_norm, zoom)
+                    sinv, cosv, rho_v, zoom_v = p.tolist()
+                    sin_th, cos_th, rho, zoom = sinv, cosv, float(rho_v), float(zoom_v)
+                    break
+            out[b, v] = torch.tensor([sin_th, cos_th, rho, zoom], device=device)
+    return out  # (B, V, 4)
+
 def make_param_group(
     module: nn.Module,
     lr: float,

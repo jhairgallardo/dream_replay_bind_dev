@@ -15,7 +15,7 @@ from models.bind import Bind_Network
 from models.generator import Generator_Network
 from models.classifier import Classifier_Network
 
-from utils import MetricLogger, accuracy, time_duration_print, build_stratified_indices, make_plot_batch, make_param_group
+from utils import MetricLogger, accuracy, time_duration_print, build_stratified_indices, make_plot_batch, make_param_group, extract_crop_params_from_raw
 
 import numpy as np
 import json
@@ -50,6 +50,7 @@ parser.add_argument('--seek_n_layers', type=int, default=8)
 parser.add_argument('--seek_n_heads', type=int, default=8)
 parser.add_argument('--seek_dim_ff', type=int, default=768) # 192*4
 parser.add_argument('--seek_dropout', type=float, default=0)
+parser.add_argument('--seek_gain_fields', action='store_true', default=False)
 ### Bind parameters
 parser.add_argument('--lr_bind', type=float, default=0.0008)
 parser.add_argument('--wd_bind', type=float, default=0.001)
@@ -145,7 +146,8 @@ def main():
                         num_layers=args.seek_n_layers, 
                         nhead=args.seek_n_heads, 
                         dim_ff=args.seek_dim_ff, 
-                        dropout=args.seek_dropout)
+                        dropout=args.seek_dropout,
+                        use_gain_fields=args.seek_gain_fields)
     bind = Bind_Network(d_model=args.bind_dim,
                         num_queries=view_encoder.num_patches, # 14x14 canvas for deit_tiny_patch16_LS (196 patches)
                         imgfttok_dim=view_encoder.embed_dim,
@@ -276,7 +278,9 @@ def main():
             noflat_acttok = flat_acttok.view(B, V, flat_acttok.size(1), -1) # (B, V, 1, D)
 
             # Seek forward pass (first view output is a bunch of zeros here. We are not predicting it. It is always available inside the transformer)
-            noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D) # (B, V, Timg, Dimg), (Timg)
+            if args.seek_gain_fields: crop_bv = extract_crop_params_from_raw(batch_episodes_actions, device=noflat_imgfttoks.device) # (B,V,4)
+            else: crop_bv = None
+            noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv) # (B, V, Timg, Dimg), (Timg)
 
             # Generator + View Encoder forward pass
             noflat_PRED_imgs = generator(noflat_PRED_imgfttoks)
@@ -414,7 +418,9 @@ def main():
                 noflat_acttok = flat_acttok.view(B, V, flat_acttok.size(1), -1) # (B, V, 1, D)
 
                 # Seek: predict IMG tokens for each view
-                noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D) # (B, V, Timg, Dimg), (Timg)
+                if args.seek_gain_fields: crop_bv = extract_crop_params_from_raw(batch_episodes_actions, device=noflat_imgfttoks.device) # (B,V,4)
+                else: crop_bv = None
+                noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv) # (B, V, Timg, Dimg), (Timg)
 
                 # Generator + Encoder (re-encode predicted images)
                 noflat_PRED_imgs = generator(noflat_PRED_imgfttoks)
@@ -518,7 +524,9 @@ def main():
                     flat_acttok = action_encoder(flat_actions) # (N*V, 1, D)
                     noflat_acttok = flat_acttok.view(N, V, flat_acttok.size(1), -1) # (N, V, 1, D)
                     # Seek forward pass
-                    noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D) # (N, V, Timg, Dimg), (Timg)
+                    if args.seek_gain_fields: crop_bv = extract_crop_params_from_raw(episodes_plot_actions, device=noflat_imgfttoks.device) # (N,V,4)
+                    else: crop_bv = None
+                    noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv) # (N, V, Timg, Dimg), (Timg)
                     # Generator forward pass
                     noflat_PRED_imgs = generator(noflat_PRED_imgfttoks) # (N, V, C, H, W)
                 episodes_plot_gen_imgs = noflat_PRED_imgs.detach().cpu() # (N, V, C, H, W)
@@ -557,7 +565,9 @@ def main():
                     flat_acttok = action_encoder(flat_actions) # (N*V, 1, D)
                     noflat_acttok = flat_acttok.view(N, V, flat_acttok.size(1), -1) # (N, V, 1, D)
                     # Seek forward pass
-                    noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D) # (N, V, Timg, Dimg), (Timg)
+                    if args.seek_gain_fields: crop_bv = extract_crop_params_from_raw(episodes_plot_actions, device=noflat_imgfttoks.device) # (N,V,4)
+                    else: crop_bv = None
+                    noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv) # (N, V, Timg, Dimg), (Timg)
                     # Generator forward pass
                     noflat_PRED_imgs = generator(noflat_PRED_imgfttoks) # (N, V, C, H, W)
                 episodes_plot_gen_imgs = noflat_PRED_imgs.detach().cpu() # (N, V, C, H, W)
