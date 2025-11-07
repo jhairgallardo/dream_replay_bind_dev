@@ -78,6 +78,8 @@ parser.add_argument('--workers', type=int, default=32)
 parser.add_argument('--save_dir', type=str, default="output/Pretraining/run_debug")
 parser.add_argument('--print_frequency', type=int, default=10)
 parser.add_argument('--seed', type=int, default=0)
+parser.add_argument('--zoom_min', type=float, default=0.08)
+parser.add_argument('--zoom_max', type=float, default=0.5)
 
 
 def main():
@@ -115,7 +117,7 @@ def main():
     ### Load Training data
     fabric.print('\n==> Preparing Training data...')
     traindir = os.path.join(args.data_path, 'train')
-    train_transform = Episode_Transformations(num_views = args.num_views, mean = args.mean, std = args.std)
+    train_transform = Episode_Transformations(num_views = args.num_views, mean = args.mean, std = args.std, zoom_range = (args.zoom_min, args.zoom_max))
     train_dataset = ImageFolder(traindir, transform=train_transform)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.episode_batch_size, shuffle=True,
                                                num_workers=args.workers, pin_memory=True, persistent_workers=True,
@@ -125,7 +127,7 @@ def main():
     ### Load Validation data
     fabric.print('\n==> Preparing Validation data...')
     valdir = os.path.join(args.data_path, 'val')
-    val_base_transform = Episode_Transformations(num_views=args.num_views, mean=args.mean, std=args.std)
+    val_base_transform = Episode_Transformations(num_views=args.num_views, mean=args.mean, std=args.std, zoom_range = (args.zoom_min, args.zoom_max))
     val_transform = DeterministicEpisodes(val_base_transform, base_seed=args.val_episode_seed)
     val_dataset = ImageFolderDetEpisodes(valdir, transform=val_transform)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.episode_batch_size, shuffle=False,
