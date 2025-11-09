@@ -15,7 +15,7 @@ def extract_crop_params_from_raw(noflat_raw_actions, device):
     Inputs:
       noflat_raw_actions: list[list[list[(name:str, params:Tensor)]]], shape (B, V, A)
     Returns:
-      crop_bv: (B, V, 4) tensor with (cosθ, sinθ, ρ, zoom)
+      crop_bv: (B, V, 4) tensor with (sinθ, cosθ, ρ, zoom)
     """
     B = len(noflat_raw_actions)
     V = len(noflat_raw_actions[0]) if B > 0 else 0
