@@ -29,10 +29,10 @@ class BasicBlockDec(nn.Module):
                 nn.GroupNorm(min([32, planes//4]), planes)
             )
         else: # Changing spatial size (expanded by x2)
-            self.conv1 = ResizeConv2d(in_planes, planes, kernel_size=3, scale_factor=stride, padding_mode='reflect')
+            self.conv1 = ResizeConv2d(in_planes, planes, kernel_size=3, scale_factor=stride, padding_mode='reflect', bias=False)
             self.norm1 = nn.GroupNorm(min([32, planes//4]), planes)
             self.shortcut = nn.Sequential(
-                ResizeConv2d(in_planes, planes, kernel_size=3, scale_factor=stride, padding_mode='reflect'),
+                ResizeConv2d(in_planes, planes, kernel_size=3, scale_factor=stride, padding_mode='reflect', bias=False),
                 nn.GroupNorm(min([32, planes//4]), planes)
             )
     def forward(self, x):
@@ -42,6 +42,10 @@ class BasicBlockDec(nn.Module):
         out = self.act(out)
         return out
 
+# def inv_softplus(y: float) -> float:
+#     # returns x s.t. softplus(x) = y
+#     return math.log(math.exp(y) - 1.0)
+
 class Generator_Network(nn.Module):
     def __init__(self,
                  in_planes=192,
@@ -49,7 +53,17 @@ class Generator_Network(nn.Module):
                  nc=3):
         super().__init__()
         self.in_planes = in_planes
-        self.out_act = lambda x: torch.tanh(x)
+        # self.out_act = lambda x: torch.tanh(x)
+
+        # ---- learnable per-channel alpha (shape 1×C×1×1), positive via softplus
+        # initialize so softplus(alpha_raw) ~= init_alpha
+        # a0 = inv_softplus(init_alpha)
+        # self.alpha_raw = nn.Parameter(torch.full((1, nc, 1, 1), a0))
+
+        self.alpha_raw = nn.Parameter(torch.zeros((1, nc, 1, 1)))
+        self.gamma_raw = nn.Parameter(torch.zeros((1, nc, 1, 1)))
+        self.alpha = self._param_in_range(self.alpha_raw, 0.8, 1.2)
+        self.gamma = self._param_in_range(self.gamma_raw, 0.8, 1.2)
 
         # Since the feature tokens start already at 14x14, we make layer 4 to output the same spatial size by doing stride 1.
         # (This is the case for ViT with 196 tokens (patch size of 16 on 224x224 images)
@@ -82,7 +96,10 @@ class Generator_Network(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {}
+        return {'alpha_raw', 'gamma_raw'}
+
+    def _param_in_range(self, raw, low: float, high: float):
+        return low + (high - low) * torch.sigmoid(raw)
 
     def forward(self, x):
         # Input x is shape (B, V, Timg, Dimg)
@@ -99,7 +116,18 @@ class Generator_Network(nn.Module):
         x = self.layer3(x) # (B*V, 128, 28, 28)
         x = self.layer2(x) # (B*V, 64, 56, 56)
         x = self.layer1(x) # (B*V, 64, 112, 112)
-        x = self.out_act(self.conv1(x)) # (B*V, 3, 224, 224)
+        logits = self.conv1(x) # (B*V, 3, 224, 224)
+
+        # x = self.out_act(logits) # (B*V, 3, 224, 224)
+
+        # Final activation
+        # alpha = F.softplus(self.alpha_raw) + 1e-4        # (1, C, 1, 1), strictly > 0
+        # x = torch.tanh(alpha * logits)                   # (B*V, C, 224, 224)
+
+        self.alpha = self._param_in_range(self.alpha_raw, 0.8, 1.2)
+        self.gamma = self._param_in_range(self.gamma_raw, 0.8, 1.2)
+        x = self.gamma * torch.tanh(self.alpha * logits)                   # (B*V, C, 224, 224)
+        
         # Reshape x to (B, V, 3, 224, 224)
         x = x.reshape(B, V, 3, 224, 224)
         return x
