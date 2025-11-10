@@ -124,7 +124,7 @@ class Action_Encoder_Network(nn.Module):
         enc_layer = nn.TransformerEncoderLayer(
             d_model, n_heads, dim_feedforward=dim_ff,
             batch_first=True, activation='gelu',
-            layer_norm_eps=1e-6, norm_first=True
+            layer_norm_eps=1e-6, norm_first=True, bias=False
         )
         self.enc = nn.TransformerEncoder(enc_layer, n_layers, norm=nn.LayerNorm(d_model, eps=1e-6))
 
@@ -136,7 +136,7 @@ class Action_Encoder_Network(nn.Module):
 
         # multihead-attn to pool: Q=pool_q, K=enc_out, V=enc_out
         self.pool_attn = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=4, batch_first=True
+            embed_dim=d_model, num_heads=4, batch_first=True, bias=False
         )
 
     @torch.jit.ignore

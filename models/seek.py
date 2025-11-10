@@ -46,18 +46,8 @@ class FilmTransformerEncoderLayer(nn.TransformerEncoderLayer):
             x = x + self.dropout2(self.linear2(self.dropout(self.activation(self.linear1(self.norm2(x))))))
             return x
 
-        # (If norm_first=False) — not used in your config, but keep parity
-        attn_in = self.norm1(x)
-        if film_qk is not None:
-            gq, bq, gk, bk = film_qk['gq'], film_qk['bq'], film_qk['gk'], film_qk['bk']
-            q_src = (1.0 + gq) * attn_in + bq
-            k_src = (1.0 + gk) * attn_in + bk
-            v_src = attn_in
-            x = x + self._sa_block(q_src, k_src, v_src, src_mask, src_key_padding_mask)
         else:
-            x = x + self._sa_block(attn_in, attn_in, attn_in, src_mask, src_key_padding_mask)
-        x = x + self._ff_block(self.norm2(x))
-        return x
+            raise ValueError("Only norm_first=True is supported")
         
 class CropFiLM(nn.Module):
     def __init__(self, hidden=64):
@@ -134,20 +124,13 @@ class Seek_Network(nn.Module):
         self.pe = SinCosPE(self.hidden_dim, 5000) 
 
         ### Transformer encoder
-        if self.use_gain_fields:
-            enc_layer = FilmTransformerEncoderLayer(
-                d_model=self.hidden_dim, nhead=nhead,
-                dim_feedforward=dim_ff, dropout=dropout,
-                activation='gelu', layer_norm_eps=1e-6,
-                batch_first=True, norm_first=True
-            )
-        else:
-            enc_layer = nn.TransformerEncoderLayer(
-                d_model=self.hidden_dim, nhead=nhead,
-                dim_feedforward=dim_ff, dropout=dropout, 
-                activation='gelu', layer_norm_eps=1e-6, 
-                batch_first=True, norm_first=True
-            )
+        enc_layer = FilmTransformerEncoderLayer(
+            d_model=self.hidden_dim, nhead=nhead,
+            dim_feedforward=dim_ff, dropout=dropout,
+            activation='gelu', layer_norm_eps=1e-6,
+            batch_first=True, norm_first=True, bias=False
+        )
+
         self.transformer_encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers, norm=nn.LayerNorm(self.hidden_dim, eps=1e-6))
 
         ### Mask token
