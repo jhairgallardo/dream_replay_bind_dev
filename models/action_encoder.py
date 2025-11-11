@@ -139,6 +139,9 @@ class Action_Encoder_Network(nn.Module):
             embed_dim=d_model, num_heads=4, batch_first=True, bias=False
         )
 
+        # Output normalization
+        self.norm_out = nn.LayerNorm(d_model, eps=1e-6)
+
     @torch.jit.ignore
     def no_weight_decay(self):
         names = {"pool_q", "aug_tokeniser.type_emb.weight", "aug_tokeniser.pad_emb"}
@@ -161,4 +164,5 @@ class Action_Encoder_Network(nn.Module):
         )
         # Collapse k → 1 by mean
         summary = summaries.mean(dim=1, keepdim=True)    # (B*V, 1, D)
+        summary = self.norm_out(summary)
         return summary
