@@ -144,6 +144,7 @@ class Action_Encoder_Network(nn.Module):
         self.num_q     = num_queries
         self.pool_q    = nn.Parameter(torch.zeros(num_queries, d_model))  # (k, D)
         trunc_normal_(self.pool_q, std=0.02)
+        self.normalize_q = nn.RMSNorm(d_model, eps=1e-6)
 
         # cross-attn to pool: Q=pool_q, K=enc_out, V=enc_out
         self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=False, 
@@ -183,6 +184,7 @@ class Action_Encoder_Network(nn.Module):
 
         # Expand k queries to batch
         q = self.pool_q.unsqueeze(0).expand(N, -1, -1)   # (N, k, D)
+        q = self.normalize_q(q)
 
         # Cross-attention pooling with your Attention block
         summaries = self.pool_attn(q, memory=h, attn_mask=mask)  # (N, k, D)
