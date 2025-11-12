@@ -1,98 +1,24 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from functools import partial
 
-from timm.models.vision_transformer import Mlp, PatchEmbed
-from timm.layers import DropPath, to_2tuple, trunc_normal_
+from models.transformer_blocks import Attention, Block_SA, Layer_scale_init_Block_SA
+
+from timm.models.vision_transformer import SwiGLU, PatchEmbed
+from timm.layers import to_2tuple, trunc_normal_
 
 # DeiT III: Revenge of the ViT (https://arxiv.org/abs/2204.07118)
 # Modifications:
 # -> Single forward pass. There is no "forward_features" method.
-# -> Added a new parameter "out_before_pool" to the forward method of the vit_models class.
-#    - If out_before_pool is True, return the output before pooling. It returns all tokens, not just the cls token.
 # -> Changed attention mechanism to use Flash Attention.
 # -> Added register tokens following "Vision Transformers Need Registers" (https://arxiv.org/abs/2309.16588)
 # -> No CLS token
 # -> No head (classifier head). It returns all patch tokens
 # -> No dropout for head since there is no head
 # -> Added 2-D Retinotopic positions (each patch center position, expanded across batch)
-
-class Attention(nn.Module):
-    # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
-        
-        ### Original Attention
-        # q = q * self.scale
-        # attn = (q @ k.transpose(-2, -1))
-        # attn = attn.softmax(dim=-1)
-        # attn = self.attn_drop(attn)
-        # x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-
-        ### Flash Attention
-        x = F.scaled_dot_product_attention(q, k, v) 
-        x = x.transpose(1,2).reshape(B, N, C)
-
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-    
-class Block(nn.Module):
-    # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,Attention_block = Attention,Mlp_block=Mlp
-                 ,init_values=1e-4):
-        super().__init__()
-        self.norm1 = norm_layer(dim)
-        self.attn = Attention_block(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp_block(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-
-    def forward(self, x):
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x 
-    
-class Layer_scale_init_Block(nn.Module):
-    # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
-    # with slight modifications
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm,Attention_block = Attention,Mlp_block=Mlp
-                 ,init_values=1e-4):
-        super().__init__()
-        self.norm1 = norm_layer(dim)
-        self.attn = Attention_block(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp_block(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-        self.gamma_1 = nn.Parameter(init_values * torch.ones((dim)),requires_grad=True)
-        self.gamma_2 = nn.Parameter(init_values * torch.ones((dim)),requires_grad=True)
-
-    def forward(self, x):
-        x = x + self.drop_path(self.gamma_1 * self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
-        return x
+# -> No Bias
+# -> Replace LayerNorm with RMSNorm
+# -> Replace Mlp with SwiGLU
     
 class vit_models(nn.Module):
     """ Vision Transformer with LayerScale (https://arxiv.org/abs/2103.17239) support
@@ -100,13 +26,13 @@ class vit_models(nn.Module):
     with slight modifications
     """
     def __init__(self, img_size=224,  patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, attn_drop_rate=0.,
-                 drop_path_rate=0., norm_layer=nn.LayerNorm, global_pool=None,
-                 block_layers = Block,
-                 Patch_layer=PatchEmbed,act_layer=nn.GELU,
-                 Attention_block = Attention, Mlp_block=Mlp,
-                dpr_constant=True,init_scale=1e-4,
-                mlp_ratio_clstk = 4.0,**kwargs):
+                 num_heads=12, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, attn_drop_rate=0.,
+                 drop_path_rate=0., norm_layer=nn.RMSNorm,
+                 block_layers = Block_SA,
+                 Patch_layer=PatchEmbed,act_layer=nn.SiLU,
+                 Attention_block = Attention, Mlp_block=SwiGLU,
+                dpr_constant=True,init_scale=1e-4, proj_bias=False, Mlp_bias=False,
+                **kwargs):
         super().__init__()
 
         self.num_reg_tokens = 16
@@ -129,7 +55,8 @@ class vit_models(nn.Module):
             block_layers(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=0.0, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
-                act_layer=act_layer,Attention_block=Attention_block,Mlp_block=Mlp_block,init_values=init_scale)
+                act_layer=act_layer,Attention_block=Attention_block,Mlp_block=Mlp_block,init_values=init_scale,
+                proj_bias=proj_bias, Mlp_bias=Mlp_bias)
             for i in range(depth)])        
             
         self.norm = norm_layer(embed_dim)
@@ -144,7 +71,7 @@ class vit_models(nn.Module):
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
+            # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
             nn.init.constant_(m.weight, 1.0)
 
     @torch.jit.ignore
@@ -201,36 +128,36 @@ class vit_models(nn.Module):
 
 def deit_tiny_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block, **kwargs)
+        img_size = img_size, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
     
 def deit_small_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block, **kwargs)
+        img_size = img_size, patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
 
 def deit_medium_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=512, depth=12, num_heads=8, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers = Layer_scale_init_Block, **kwargs)
+        img_size = img_size, patch_size=16, embed_dim=512, depth=12, num_heads=8, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
     return model 
 
 def deit_base_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block, **kwargs)
+        img_size = img_size, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
     
 def deit_large_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block, **kwargs)
+        img_size = img_size, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
 
 def deit_huge_patch14_LS(pretrained=False, img_size=224, pretrained_21k = False,  **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=14, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4, qkv_bias=True,
-        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers = Layer_scale_init_Block, **kwargs)
+        img_size = img_size, patch_size=14, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
     return model

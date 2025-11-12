@@ -5,6 +5,8 @@ import torch.nn as nn
 from timm.layers import trunc_normal_
 from torch.nn.utils.rnn import pad_sequence
 
+from models.transformer_blocks import Attention, Block_SA, Layer_scale_init_Block_SA
+
 class SinCosPE(nn.Module):
     def __init__(self, dim, max_length):
         super().__init__()
@@ -87,6 +89,7 @@ class AugTokenizerSparse(nn.Module):
         Lmax   = max(s.size(0) for s in seqs)
         padded = pad_sequence(seqs, batch_first=True, padding_value=0.)
         lengths= torch.tensor([s.size(0) for s in seqs], device=padded.device)
+        # Note about mask: True means padding token.
         mask   = torch.arange(Lmax, device=padded.device)[None, :] >= lengths[:, None]
 
         padded[mask] = self.pad_emb                # replace zeros with <PAD>
@@ -109,7 +112,7 @@ class AugTokenizerSparse(nn.Module):
         return padded, mask                        # (B,L,D), (B,L)
 
 class Action_Encoder_Network(nn.Module):
-    def __init__(self, d_model=64, n_layers=2, n_heads=4, dim_ff=256):
+    def __init__(self, d_model=64, n_layers=2, n_heads=4, dropout=0.0, drop_path_rate=0.0):
         super().__init__()
         self.dim_type_emb = d_model // 2
         self.dim_linparam = d_model // 2
@@ -120,13 +123,21 @@ class Action_Encoder_Network(nn.Module):
         # Positional encoding
         self.pe_aug = SinCosPE(self.dim_type_emb, 16)
         
-        # Transformer encoder
-        enc_layer = nn.TransformerEncoderLayer(
-            d_model, n_heads, dim_feedforward=dim_ff,
-            batch_first=True, activation='gelu',
-            layer_norm_eps=1e-6, norm_first=True, bias=False
-        )
-        self.enc = nn.TransformerEncoder(enc_layer, n_layers, norm=nn.LayerNorm(d_model, eps=1e-6))
+        # Transformer blocks
+        dpr = [drop_path_rate for i in range(n_layers)]
+        self.blocks = nn.ModuleList([
+            Layer_scale_init_Block_SA(
+                dim=d_model,
+                num_heads=n_heads,
+                qkv_bias=False,
+                drop=dropout,
+                attn_drop=dropout,
+                drop_path=dpr[i],
+                proj_bias=False,
+                Mlp_bias=False,
+            ) for i in range(n_layers)
+        ])
+        self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
 
         # k learnable queries to pool L -> k
         num_queries = 4
@@ -134,13 +145,12 @@ class Action_Encoder_Network(nn.Module):
         self.pool_q    = nn.Parameter(torch.zeros(num_queries, d_model))  # (k, D)
         trunc_normal_(self.pool_q, std=0.02)
 
-        # multihead-attn to pool: Q=pool_q, K=enc_out, V=enc_out
-        self.pool_attn = nn.MultiheadAttention(
-            embed_dim=d_model, num_heads=4, batch_first=True, bias=False
-        )
+        # cross-attn to pool: Q=pool_q, K=enc_out, V=enc_out
+        self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=False, 
+                                   attn_drop=dropout, proj_drop=dropout, proj_bias=False)
 
         # Output normalization
-        self.norm_out = nn.LayerNorm(d_model, eps=1e-6)
+        self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -150,19 +160,34 @@ class Action_Encoder_Network(nn.Module):
     def forward(self, actions):
         # Actions are (B*V, A)
         N = len(actions) # N = B*V
+
         # Tokenize actions
-        aug_tokens, pad_masks = self.aug_tokeniser(actions)    # (B*V, Taug, Daug),(B*V, Taug), Taug is the maximum number of augmentation operations for any action in the batch
+        aug_tokens, pad_masks = self.aug_tokeniser(actions)    # (N, L, Daug), (N, L), L is the maximum number of augmentation operations for any action in the batch
+        
         # Add positional encoding
-        aug_tokens = aug_tokens + self.pe_aug(aug_tokens.size(1), append_zeros_dim=self.dim_linparam)
-        # Encode all L tokens
-        h = self.enc(aug_tokens, src_key_padding_mask=pad_masks)   # (B*V, L, D)
+        x = aug_tokens + self.pe_aug(aug_tokens.size(1), append_zeros_dim=self.dim_linparam)
+        L = x.size(1)
+
+        # Adjust mask and expand
+        # Note: pad_masks has True for tokens to ignore. False means tokens are allowed to attend to.
+        # The attention in the block expects the opposite.
+        # We use ~pad_masks to get the opposite 
+        # (True meaning attention is allowed. False meaning attention is masked out).
+        # We also need to expand it to 4D for the attention block.
+        mask = (~pad_masks).unsqueeze(1).unsqueeze(1) # (N, 1, 1, L)
+        
+        # Transformer blocks
+        for blk in self.blocks:
+            x = blk(x, x_mask=mask)
+        h = self.final_norm(x)  # (N, L, D)
+
         # Expand k queries to batch
-        q = self.pool_q.unsqueeze(0).expand(N, -1, -1)   # (B*V, k, D)
-        # Attend k queries over the L outputs
-        summaries, _ = self.pool_attn(
-            q, h, h, key_padding_mask=pad_masks            # (B*V, k, D)
-        )
+        q = self.pool_q.unsqueeze(0).expand(N, -1, -1)   # (N, k, D)
+
+        # Cross-attention pooling with your Attention block
+        summaries = self.pool_attn(q, memory=h, attn_mask=mask)  # (N, k, D)
+
         # Collapse k → 1 by mean
-        summary = summaries.mean(dim=1, keepdim=True)    # (B*V, 1, D)
+        summary = summaries.mean(dim=1, keepdim=True)    # (N, 1, D)
         summary = self.norm_out(summary)
         return summary

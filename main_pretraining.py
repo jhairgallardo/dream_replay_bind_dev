@@ -41,14 +41,12 @@ parser.add_argument('--wd_act_enc', type=float, default=0)
 parser.add_argument('--act_enc_dim', type=int, default=64)
 parser.add_argument('--act_enc_n_layers', type=int, default=2)
 parser.add_argument('--act_enc_n_heads', type=int, default=4)
-parser.add_argument('--act_enc_dim_ff', type=int, default=256)
 ### Seek parameters
 parser.add_argument('--lr_seek', type=float, default=0.0008)
 parser.add_argument('--wd_seek', type=float, default=0)
 parser.add_argument('--seek_dim', type=int, default=192)
 parser.add_argument('--seek_n_layers', type=int, default=8)
 parser.add_argument('--seek_n_heads', type=int, default=8)
-parser.add_argument('--seek_dim_ff', type=int, default=768) # 192*4
 parser.add_argument('--seek_dropout', type=float, default=0)
 parser.add_argument('--seek_gain_fields', action='store_true', default=False)
 # ### Bind parameters
@@ -145,14 +143,12 @@ def main():
     view_encoder = deit_tiny_patch16_LS(drop_path_rate=args.venc_drop_path)
     action_encoder = Action_Encoder_Network(d_model=args.act_enc_dim, 
                                             n_layers=args.act_enc_n_layers, 
-                                            n_heads=args.act_enc_n_heads, 
-                                            dim_ff=args.act_enc_dim_ff)
+                                            n_heads=args.act_enc_n_heads)
     seek = Seek_Network(d_model=args.seek_dim,
                         imgfttok_dim=view_encoder.embed_dim, 
                         acttok_dim=args.act_enc_dim,
                         num_layers=args.seek_n_layers, 
-                        nhead=args.seek_n_heads, 
-                        dim_ff=args.seek_dim_ff, 
+                        nhead=args.seek_n_heads,
                         dropout=args.seek_dropout,
                         use_gain_fields=args.seek_gain_fields)
     # bind = Bind_Network(d_model=args.bind_dim,

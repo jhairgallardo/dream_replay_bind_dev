@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from timm.layers import trunc_normal_
 
+from models.transformer_blocks import BlockFiLM_SA,Layer_scale_init_BlockFiLM_SA
+
 class SinCosPE(nn.Module):
     def __init__(self, dim, max_length):
         super().__init__()
@@ -15,39 +17,6 @@ class SinCosPE(nn.Module):
 
     def forward(self, seq_length):
         return self.pe[: seq_length].unsqueeze(0)
-
-class FilmTransformerEncoderLayer(nn.TransformerEncoderLayer):
-    """
-    Drop-in replacement for nn.TransformerEncoderLayer that can apply FiLM to Q/K.
-    film_qk must be a dict with 'gq','bq','gk','bk' tensors of shape (B, L, 1) (broadcasted scalars).
-    If film_qk is None, behaves exactly like the base class.
-    """
-    def forward(self, src, src_mask=None, src_key_padding_mask=None, film_qk=None):
-        # Pre-norm branch is used in your config (norm_first=True)
-        x = src
-        if self.norm_first:
-            x2 = self.norm1(x)
-            if film_qk is not None:
-                # Build q_src and k_src with FiLM on the normalized tokens
-                gq, bq, gk, bk = film_qk['gq'], film_qk['bq'], film_qk['gk'], film_qk['bk']  # (B,L,1)
-                q_src = (1.0 + gq) * x2 + bq
-                k_src = (1.0 + gk) * x2 + bk
-                v_src = x2
-                attn_out = self.self_attn(q_src, k_src, v_src,
-                                          attn_mask=src_mask,
-                                          key_padding_mask=src_key_padding_mask,
-                                          need_weights=False)[0]
-            else:
-                attn_out = self.self_attn(x2, x2, x2,
-                                          attn_mask=src_mask,
-                                          key_padding_mask=src_key_padding_mask,
-                                          need_weights=False)[0]
-            x = x + self.dropout1(attn_out)
-            x = x + self.dropout2(self.linear2(self.dropout(self.activation(self.linear1(self.norm2(x))))))
-            return x
-
-        else:
-            raise ValueError("Only norm_first=True is supported")
         
 class CropFiLM(nn.Module):
     def __init__(self, hidden=64):
@@ -91,9 +60,9 @@ class Seek_Network(nn.Module):
                  acttok_dim=64, 
                  num_layers=8, 
                  nhead=8, 
-                 dim_ff=1024, 
                  dropout=0,
-                 use_gain_fields=False):
+                 use_gain_fields=False,
+                 drop_path_rate=0.0):
         super(Seek_Network, self).__init__()
 
         ### Crop FiLM
@@ -105,14 +74,14 @@ class Seek_Network(nn.Module):
         self.hidden_dim = d_model
 
         ### Input projections per token type
-        self.acttok_mlp_in    = nn.Linear(acttok_dim, self.hidden_dim)
-        self.retpatch_mlp_in  = nn.Linear(imgfttok_dim+ret2d_dim, self.hidden_dim)
+        self.acttok_mlp_in    = nn.Linear(acttok_dim, self.hidden_dim, bias=False)
+        self.retpatch_mlp_in  = nn.Linear(imgfttok_dim+ret2d_dim, self.hidden_dim, bias=False)
         
         ### Output projections per token type
-        self.retpatch_mlp_out = nn.Linear(self.hidden_dim, imgfttok_dim+ret2d_dim)
+        self.retpatch_mlp_out = nn.Linear(self.hidden_dim, imgfttok_dim+ret2d_dim, bias=False)
 
         ### Norm out (Normalize predicted patch tokens output)
-        self.norm_out = nn.LayerNorm(imgfttok_dim, eps=1e-6)
+        self.norm_out = nn.RMSNorm(imgfttok_dim, eps=1e-6)
 
         ### Type embeddings per token type
         self.type_emb_acttok = nn.Parameter(torch.zeros(self.hidden_dim))
@@ -123,15 +92,21 @@ class Seek_Network(nn.Module):
         ### pos-encodings
         self.pe = SinCosPE(self.hidden_dim, 5000) 
 
-        ### Transformer encoder
-        enc_layer = FilmTransformerEncoderLayer(
-            d_model=self.hidden_dim, nhead=nhead,
-            dim_feedforward=dim_ff, dropout=dropout,
-            activation='gelu', layer_norm_eps=1e-6,
-            batch_first=True, norm_first=True, bias=False
-        )
-
-        self.transformer_encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers, norm=nn.LayerNorm(self.hidden_dim, eps=1e-6))
+        ### Transformer blocks
+        dpr = [drop_path_rate for i in range(num_layers)]
+        self.blocks = nn.ModuleList([
+            Layer_scale_init_BlockFiLM_SA(
+                dim=self.hidden_dim,
+                num_heads=nhead,
+                qkv_bias=False,
+                drop=dropout,
+                attn_drop=dropout,
+                drop_path=dpr[i],
+                proj_bias=False,
+                Mlp_bias=False
+            ) for i in range(num_layers)
+        ])
+        self.final_norm = nn.RMSNorm(self.hidden_dim, eps=1e-6)
 
         ### Mask token
         self.mask_retpatchtok = nn.Parameter(torch.zeros(self.hidden_dim))
@@ -173,11 +148,11 @@ class Seek_Network(nn.Module):
         noflat_retpatch = torch.cat((noflat_imgfttoks, noflat_ret2D), dim=-1) # (B, V, Timg, Dimg+Dret2D)
 
         # 2) Project the input tokens to the hidden dimension and normalize
-        noflat_acttok_hidden = self.acttok_mlp_in(noflat_acttok) # (B, V, 1, Dhidden)
+        noflat_acttok_hidden   = self.acttok_mlp_in(noflat_acttok) # (B, V, 1, Dhidden)
         noflat_retpatch_hidden = self.retpatch_mlp_in(noflat_retpatch) # (B, V, Timg, Dhidden)
 
         # 3) Add type embeddings
-        noflat_acttok_hidden = noflat_acttok_hidden + self.type_emb_acttok.reshape(1,1,1,Dhidden).expand(B,V,1,Dhidden) # (B, V, 1, Dhidden)
+        noflat_acttok_hidden   = noflat_acttok_hidden   + self.type_emb_acttok.reshape(1,1,1,Dhidden).expand(B,V,1,Dhidden) # (B, V, 1, Dhidden)
         noflat_retpatch_hidden = noflat_retpatch_hidden + self.type_emb_retpatch.reshape(1,1,1,Dhidden).expand(B,V,Timg,Dhidden) # (B, V, Timg, Dhidden)
 
         # 4) Concatenate the tokens for each view and reshape to (B, V*Timg, Dhidden)
@@ -187,50 +162,47 @@ class Seek_Network(nn.Module):
         # 5) Pre-compute positional encoding
         pe = self.pe(base_seqs.size(1)) # (1, V*(1+Timg), Dhidden)
 
-        # 6) Normalize mask token and add type embedding
+        # 6) Get mask token and add type embedding
         mask_retpatchtok = self.mask_retpatchtok + self.type_emb_mask_retpatchtok # (Dhidden)
 
-        # 7) Generate a random mask (like in MAE). We won't replace the complete view with mask tokens, only a subset of the tokens selected by the random mask.
+        # 7) Generate a random mask with a random ratio between 0.75 and 1.0 per minibatch
         ratio_range=(0.75, 1.0)
         ratio=torch.rand(1).item() * (ratio_range[1] - ratio_range[0]) + ratio_range[0] # random ratio between 0.75 and 1.0 per minibacth
-        
-        # If it is not training, we use ratio = 1.0 (When the network is frozen or used for validation, mask the whole view) ##########################
+        # If it is not training, we use ratio = 1.0 (When the network is frozen or used for validation, mask the whole view)
         if not self.training:
             ratio = 1.0
-        ###############################################################################################################################################
-        
         num_masked_tokens = int(Timg * ratio)
         mask_indices = torch.randperm(Timg)[:num_masked_tokens]
 
-        # 8) Predict current view by replacing its input tokens with mask tokens (dev3)-> Include view 1
+        # 8) Precompute FiLM maps shaped to the flattened sequence (B,L,1)
+        film_maps = None
+        if self.use_gain_fields and film_gkq is not None:
+            film_maps = _make_film_maps(film_gkq, B, V, Timg, base_seqs.device)
+
+        # 9) Predict current view by replacing its input tokens with mask tokens (dev3)-> Include view 1
         noflat_PRED_imgfttoks = torch.zeros_like(noflat_imgfttoks, device=noflat_imgfttoks.device) # (B, V, Timg, Dimg)
         for i in range(V):
-            # Clone sequences
             seqs = base_seqs.clone() # (B, V*(1+Timg), Dhidden)
-            # Define start and end of mask
             start = i*(1+Timg)+1
             end = (i+1)*(1+Timg)
-            # Mask some of the tokens of the current view
+
+            # Mask current view
             seqs[:, start:end, :][:, mask_indices, :] = mask_retpatchtok.reshape(1, 1, Dhidden).expand(B, num_masked_tokens, Dhidden)
+
             # Add positional encoding
-            seqs = seqs + pe[:, :seqs.size(1), :]
-            # Encode
-            if self.use_gain_fields and film_gkq is not None:
-                film_maps = _make_film_maps(film_gkq, B, V, Timg, seqs.device)
-                # pass FiLM maps layer-by-layer by re-wrapping the encoder run:
-                # (nn.TransformerEncoder doesn't accept per-layer kwargs, so we run blocks manually)
-                x = seqs
-                for layer in self.transformer_encoder.layers:
-                    x = layer(x, film_qk=film_maps)
-                x = self.transformer_encoder.norm(x)
-                seqs_out = x
-            else:
-                seqs_out = self.transformer_encoder(seqs) # (B, V*(1+Timg), Dhidden)
+            x = seqs + pe[:, :seqs.size(1), :]
+
+            # Runs transformer blocks
+            for blk in self.blocks:
+                if film_maps is not None:
+                    x = blk(x, film_qk=film_maps)
+                else:
+                    x = blk(x)
+            seqs_out = self.final_norm(x)
 
             # Collect predictions at the masked positions
             pred_retpatch_hidden = seqs_out[:, start:end, :] # (B, Timg, Dhidden)
             pred_retpatch = self.retpatch_mlp_out(pred_retpatch_hidden) # (B, Timg, Dimg+Dret2D)
-
             noflat_PRED_imgfttoks[:, i, :, :] = self.norm_out(pred_retpatch[:, :, :Dimg]) # (B, Timg, Dimg)
 
         return noflat_PRED_imgfttoks, mask_indices
