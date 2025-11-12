@@ -85,6 +85,8 @@ class Generator_Network(nn.Module):
         for m in self.modules():
             if isinstance(m, BasicBlockDec) and m.norm1.weight is not None:
                 nn.init.constant_(m.norm1.weight, 0) # shutdown the main path and only let the residual path pass at init
+        
+        self.nc = nc
 
     def _make_layer(self, BasicBlockDec, planes, num_Blocks, stride):
         strides = [stride] + [1]*(num_Blocks-1)
@@ -128,6 +130,6 @@ class Generator_Network(nn.Module):
         self.gamma = self._param_in_range(self.gamma_raw, 0.8, 1.2)
         x = self.gamma * torch.tanh(self.alpha * logits)                   # (B*V, C, 224, 224)
         
-        # Reshape x to (B, V, 3, 224, 224)
-        x = x.reshape(B, V, 3, 224, 224)
+        # Reshape x to (B, V, nc, 224, 224)
+        x = x.reshape(B, V, self.nc, 224, 224)
         return x
