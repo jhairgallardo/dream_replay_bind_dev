@@ -29,8 +29,13 @@ parser = argparse.ArgumentParser(description='Pre-training Dream Replay Bind')
 parser.add_argument('--data_path', type=str, default='/data/datasets/caltech256/256_ObjectCategories_splits')
 parser.add_argument('--val_episode_seed', type=int, default=12345)
 parser.add_argument('--num_classes', type=int, default=256)
-parser.add_argument('--mean', type=list, default=[0.5, 0.5, 0.5])
-parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5])
+# parser.add_argument('--mean', type=list, default=[0.5, 0.5, 0.5])
+# parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5])
+# parser.add_argument('--channels', type=int, default=3)
+parser.add_argument('--mean', type=list, default=[0.5, 0.5, 0.5, 0.0])
+parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5, 1.0])
+parser.add_argument('--channels', type=int, default=4)
+parser.add_argument('--only_crop', action='store_true', default=False)
 ### View encoder parameters
 parser.add_argument('--lr_venc', type=float, default=0.0008)
 parser.add_argument('--wd_venc', type=float, default=0.05)
@@ -120,7 +125,8 @@ def main():
     ### Load Training data
     fabric.print('\n==> Preparing Training data...')
     traindir = os.path.join(args.data_path, 'train')
-    train_transform = Episode_Transformations(num_views = args.num_views, mean = args.mean, std = args.std, zoom_range = (args.zoom_min, args.zoom_max))
+    train_transform = Episode_Transformations(num_views = args.num_views, mean = args.mean, std = args.std, channels=args.channels,
+                                              zoom_range = (args.zoom_min, args.zoom_max), only_crop=args.only_crop)
     train_dataset = ImageFolder(traindir, transform=train_transform)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.episode_batch_size, shuffle=True,
                                                num_workers=args.workers, pin_memory=True, persistent_workers=True,
@@ -130,7 +136,8 @@ def main():
     ### Load Validation data
     fabric.print('\n==> Preparing Validation data...')
     valdir = os.path.join(args.data_path, 'val')
-    val_base_transform = Episode_Transformations(num_views=args.num_views, mean=args.mean, std=args.std, zoom_range = (args.zoom_min, args.zoom_max))
+    val_base_transform = Episode_Transformations(num_views=args.num_views, mean=args.mean, std=args.std, channels=args.channels,
+                                                 zoom_range = (args.zoom_min, args.zoom_max), only_crop=args.only_crop)
     val_transform = DeterministicEpisodes(val_base_transform, base_seed=args.val_episode_seed)
     val_dataset = ImageFolderDetEpisodes(valdir, transform=val_transform)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.episode_batch_size, shuffle=False,
@@ -140,10 +147,11 @@ def main():
 
     ### Define models
     fabric.print('\n==> Prepare models...')
-    view_encoder = deit_tiny_patch16_LS(drop_path_rate=args.venc_drop_path)
+    view_encoder = deit_tiny_patch16_LS(drop_path_rate=args.venc_drop_path, in_chans=args.channels)
     action_encoder = Action_Encoder_Network(d_model=args.act_enc_dim, 
                                             n_layers=args.act_enc_n_layers, 
-                                            n_heads=args.act_enc_n_heads)
+                                            n_heads=args.act_enc_n_heads,
+                                            only_crop=args.only_crop)
     seek = Seek_Network(d_model=args.seek_dim,
                         imgfttok_dim=view_encoder.embed_dim, 
                         acttok_dim=args.act_enc_dim,
@@ -161,7 +169,7 @@ def main():
     #                     dropout=args.bind_dropout)
     generator = Generator_Network(in_planes=view_encoder.embed_dim, 
                                   num_Blocks=args.gen_num_Blocks, 
-                                  nc=3)
+                                  nc=args.channels)
     # classifier = Classifier_Network(input_dim=args.bind_dim, num_classes=args.num_classes)
                                                   
     ### Print models
@@ -230,6 +238,8 @@ def main():
         episode_0_imgs = episodes_plot_train[0][0]
         episode_0_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_0_imgs]
         episode_0_imgs = torch.stack(episode_0_imgs, dim=0)
+        if args.channels == 4:
+            episode_0_imgs = episode_0_imgs[:, :3, :, :] # (V, 3, H, W)
         grid = torchvision.utils.make_grid(episode_0_imgs, nrow=args.num_views)
         grid = grid.permute(1, 2, 0).cpu().numpy()
         grid = (grid * 255).astype(np.uint8)
@@ -239,6 +249,8 @@ def main():
         episode_0_imgs = episodes_plot_val[0][0]
         episode_0_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_0_imgs]
         episode_0_imgs = torch.stack(episode_0_imgs, dim=0)
+        if args.channels == 4:
+            episode_0_imgs = episode_0_imgs[:, :3, :, :] # (V, 3, H, W)
         grid = torchvision.utils.make_grid(episode_0_imgs, nrow=args.num_views)
         grid = grid.permute(1, 2, 0).cpu().numpy()
         grid = (grid * 255).astype(np.uint8)
@@ -296,12 +308,9 @@ def main():
             noflat_PRED_imgfttoks, mask_indices = seek(noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv) # (B, V, Timg, Dimg), (Timg)
 
             if fabric.is_global_zero and ((i % args.print_frequency) == 0):
-                fabric.log(name=f'Generator Alpha dim 1', value=generator.alpha.squeeze()[0].item(), step=epoch*len(train_loader)+i)
-                fabric.log(name=f'Generator Alpha dim 2', value=generator.alpha.squeeze()[1].item(), step=epoch*len(train_loader)+i)
-                fabric.log(name=f'Generator Alpha dim 3', value=generator.alpha.squeeze()[2].item(), step=epoch*len(train_loader)+i)
-                fabric.log(name=f'Generator Gamma dim 1', value=generator.gamma.squeeze()[0].item(), step=epoch*len(train_loader)+i)
-                fabric.log(name=f'Generator Gamma dim 2', value=generator.gamma.squeeze()[1].item(), step=epoch*len(train_loader)+i)
-                fabric.log(name=f'Generator Gamma dim 3', value=generator.gamma.squeeze()[2].item(), step=epoch*len(train_loader)+i)
+                for j in range(generator.alpha.squeeze().size(0)):
+                    fabric.log(name=f'Generator Alpha dim {j+1}', value=generator.alpha.squeeze()[j].item(), step=epoch*len(train_loader)+i)
+                    fabric.log(name=f'Generator Gamma dim {j+1}', value=generator.gamma.squeeze()[j].item(), step=epoch*len(train_loader)+i)
 
             # Generator + View Encoder forward pass
             noflat_PRED_imgs = generator(noflat_PRED_imgfttoks)
@@ -534,7 +543,7 @@ def main():
                 N = PLOT_N
 
                 ## Train batch plot
-                episodes_plot_imgs = episodes_plot_train[0][:N] # (N, V, C, H, W)
+                episodes_plot_imgs = episodes_plot_train[0][:N].to(fabric.device) # (N, V, C, H, W)
                 episodes_plot_actions = episodes_plot_train[1][:N] # (N, V, A)
                 _, V, C, H, W = episodes_plot_imgs.shape
                 with torch.no_grad():
@@ -563,7 +572,13 @@ def main():
                     episode_i_gen_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_i_gen_imgs]
                     episode_i_gen_imgs = torch.stack(episode_i_gen_imgs, dim=0) # (V, C, H, W)
                     episode_i_gen_imgs = torch.clamp(episode_i_gen_imgs, 0, 1) # Clip values to [0, 1]
-                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs], dim=0), nrow=args.num_views)
+                    if args.channels == 4:
+                        episode_i_gen_imgs_4th_channel = episode_i_gen_imgs[:, 3:, :, :] # (V, 1, H, W)
+                        # repeat the 4th channel to have also a 3 channel image so we can plot it together with the other images
+                        episode_i_gen_imgs_4th_channel = episode_i_gen_imgs_4th_channel.repeat(1, 3, 1, 1) # (V, 3, H, W)
+                        episode_i_imgs = episode_i_imgs[:, :3, :, :] # (V, 3, H, W)
+                        episode_i_gen_imgs = episode_i_gen_imgs[:, :3, :, :] # (V, 3, H, W) 
+                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs, episode_i_gen_imgs_4th_channel], dim=0), nrow=args.num_views)
                     grid = grid.permute(1, 2, 0).cpu().numpy()
                     grid = (grid * 255).astype(np.uint8)
                     grid = Image.fromarray(grid)
@@ -575,7 +590,7 @@ def main():
                     grid.save(os.path.join(save_plot_dir, image_name))
 
                 ## Validation batch plot
-                episodes_plot_imgs = episodes_plot_val[0][:N] # (N, V, C, H, W)
+                episodes_plot_imgs = episodes_plot_val[0][:N].to(fabric.device) # (N, V, C, H, W)
                 episodes_plot_actions = episodes_plot_val[1][:N] # (N, V, A)
                 _, V, C, H, W = episodes_plot_imgs.shape
                 with torch.no_grad():
@@ -604,7 +619,13 @@ def main():
                     episode_i_gen_imgs = [torchvision.transforms.functional.normalize(img, [-m/s for m, s in zip(args.mean, args.std)], [1/s for s in args.std]) for img in episode_i_gen_imgs]
                     episode_i_gen_imgs = torch.stack(episode_i_gen_imgs, dim=0) # (V, C, H, W)
                     episode_i_gen_imgs = torch.clamp(episode_i_gen_imgs, 0, 1) # Clip values to [0, 1]
-                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs], dim=0), nrow=args.num_views)
+                    if args.channels == 4:
+                        episode_i_gen_imgs_4th_channel = episode_i_gen_imgs[:, 3:, :, :] # (V, 1, H, W)
+                        # repeat the 4th channel to have also a 3 channel image so we can plot it together with the other images
+                        episode_i_gen_imgs_4th_channel = episode_i_gen_imgs_4th_channel.repeat(1, 3, 1, 1) # (V, 3, H, W)
+                        episode_i_imgs = episode_i_imgs[:, :3, :, :] # (V, 3, H, W)
+                        episode_i_gen_imgs = episode_i_gen_imgs[:, :3, :, :] # (V, 3, H, W)
+                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs, episode_i_gen_imgs_4th_channel], dim=0), nrow=args.num_views)
                     grid = grid.permute(1, 2, 0).cpu().numpy()
                     grid = (grid * 255).astype(np.uint8)
                     grid = Image.fromarray(grid)
