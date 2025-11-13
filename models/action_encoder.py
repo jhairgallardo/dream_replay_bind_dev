@@ -26,31 +26,41 @@ class SinCosPE(nn.Module):
             return torch.cat([pe, zeros], dim=1).unsqueeze(0)
 
 class AugTokenizerSparse(nn.Module):
-    def __init__(self, d_type_emb=32, d_linparam=32):
+    def __init__(self, d_type_emb=32, d_linparam=32, only_crop=False):
         super().__init__()
         self.d_type_emb = d_type_emb
         self.d_linparam = d_linparam
         self.d = d_type_emb + d_linparam
-        self.name2id = {
-            "crop": 0, 
-            # "hflip": 1, 
-            "jitter": 1, #2,
-            "gray": 2, #3, 
-            "blur": 3, #4, 
-            "solar": 4, #5,
-            # "none": 5, #6,                      # emitted when list is empty
-        }
+        if only_crop:
+            self.name2id = {
+                "crop": 0,
+            }
+        else:
+            self.name2id = {
+                "crop": 0, 
+                # "hflip": 1, 
+                "jitter": 1, #2,
+                "gray": 2, #3, 
+                "blur": 3, #4, 
+                "solar": 4, #5,
+                # "none": 5, #6,                      # emitted when list is empty
+            }
         self.type_emb = nn.Embedding(len(self.name2id), d_type_emb)
 
-        self.proj = nn.ModuleDict({
-            "crop"  : nn.Linear(4, d_linparam), # process 4 params
-            # "hflip" : None,                  # no params to process
-            "jitter": nn.Linear(7, d_linparam), # process 7 params
-            "gray"  : None,                  # no params to process
-            "blur"  : nn.Linear(1, d_linparam), # process 1 param
-            "solar" : nn.Linear(1, d_linparam), # process 1 param
-            # "none"  : None,                  # no params to process
-        })
+        if only_crop:
+            self.proj = nn.ModuleDict({
+                "crop"  : nn.Linear(4, d_linparam), # process 4 params
+            })
+        else:
+            self.proj = nn.ModuleDict({
+                "crop"  : nn.Linear(4, d_linparam), # process 4 params
+                # "hflip" : None,                  # no params to process
+                "jitter": nn.Linear(7, d_linparam), # process 7 params
+                "gray"  : None,                  # no params to process
+                "blur"  : nn.Linear(1, d_linparam), # process 1 param
+                "solar" : nn.Linear(1, d_linparam), # process 1 param
+                # "none"  : None,                  # no params to process
+            })
 
         self.pad_emb  = nn.Parameter(torch.zeros(1, self.d))   # <PAD>
     
@@ -112,13 +122,13 @@ class AugTokenizerSparse(nn.Module):
         return padded, mask                        # (B,L,D), (B,L)
 
 class Action_Encoder_Network(nn.Module):
-    def __init__(self, d_model=64, n_layers=2, n_heads=4, dropout=0.0, drop_path_rate=0.0):
+    def __init__(self, d_model=64, n_layers=2, n_heads=4, dropout=0.0, drop_path_rate=0.0, only_crop=False):
         super().__init__()
         self.dim_type_emb = d_model // 2
         self.dim_linparam = d_model // 2
 
         # Action Tokenizer
-        self.aug_tokeniser = AugTokenizerSparse(d_type_emb=self.dim_type_emb, d_linparam=self.dim_linparam)
+        self.aug_tokeniser = AugTokenizerSparse(d_type_emb=self.dim_type_emb, d_linparam=self.dim_linparam, only_crop=only_crop)
 
         # Positional encoding
         self.pe_aug = SinCosPE(self.dim_type_emb, 16)
@@ -129,12 +139,12 @@ class Action_Encoder_Network(nn.Module):
             Layer_scale_init_Block_SA(
                 dim=d_model,
                 num_heads=n_heads,
-                qkv_bias=False,
+                qkv_bias=True, # False
                 drop=dropout,
                 attn_drop=dropout,
                 drop_path=dpr[i],
-                proj_bias=False,
-                Mlp_bias=False,
+                proj_bias=True, # False
+                Mlp_bias=True, # False
             ) for i in range(n_layers)
         ])
         self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
@@ -144,14 +154,14 @@ class Action_Encoder_Network(nn.Module):
         self.num_q     = num_queries
         self.pool_q    = nn.Parameter(torch.zeros(num_queries, d_model))  # (k, D)
         trunc_normal_(self.pool_q, std=0.02)
-        self.normalize_q = nn.RMSNorm(d_model, eps=1e-6)
+        # self.normalize_q = nn.RMSNorm(d_model, eps=1e-6)
 
-        # cross-attn to pool: Q=pool_q, K=enc_out, V=enc_out
-        self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=False, 
-                                   attn_drop=dropout, proj_drop=dropout, proj_bias=False)
+        # # cross-attn to pool: Q=pool_q, K=enc_out, V=enc_out
+        self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=True, # False
+                                   attn_drop=dropout, proj_drop=dropout, proj_bias=True) # False
 
         # Output normalization
-        self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
+        # self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
 
     @torch.jit.ignore
     def no_weight_decay(self):
@@ -184,12 +194,12 @@ class Action_Encoder_Network(nn.Module):
 
         # Expand k queries to batch
         q = self.pool_q.unsqueeze(0).expand(N, -1, -1)   # (N, k, D)
-        q = self.normalize_q(q)
+        # q = self.normalize_q(q)
 
         # Cross-attention pooling with your Attention block
         summaries = self.pool_attn(q, memory=h, attn_mask=mask)  # (N, k, D)
 
         # Collapse k → 1 by mean
         summary = summaries.mean(dim=1, keepdim=True)    # (N, 1, D)
-        summary = self.norm_out(summary)
+        # summary = self.norm_out(summary)
         return summary
