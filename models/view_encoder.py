@@ -70,7 +70,7 @@ class vit_models(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
+        elif isinstance(m, nn.RMSNorm):
             # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
             nn.init.constant_(m.weight, 1.0)
 
