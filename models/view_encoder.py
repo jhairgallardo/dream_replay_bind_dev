@@ -19,7 +19,28 @@ from timm.layers import to_2tuple, trunc_normal_
 # -> No Bias
 # -> Replace LayerNorm with RMSNorm
 # -> Replace Mlp with SwiGLU
-    
+
+def _make_sincos_pos_embed(embed_dim, grid_h, grid_w):
+    # build 2D grid
+    y = torch.arange(grid_h).float()
+    x = torch.arange(grid_w).float()
+    yy, xx = torch.meshgrid(y, x, indexing='ij')  # (Gh, Gw)
+    # normalize to [-1, 1]
+    yy = (yy / (grid_h - 1)) * 2 - 1
+    xx = (xx / (grid_w - 1)) * 2 - 1
+    # frequencies
+    dim_half = embed_dim // 2
+    freqs = torch.arange(dim_half) / dim_half
+    freqs = 1.0 / (10000 ** freqs)  # (D/2,)
+    # apply sin/cos on each axis
+    pe_x = torch.einsum('hw,d->hwd', xx, freqs)
+    pe_y = torch.einsum('hw,d->hwd', yy, freqs)
+    pe = torch.cat([pe_x.sin(), pe_x.cos(), pe_y.sin(), pe_y.cos()], dim=-1)  # (Gh, Gw, 2*D)
+    pe = pe[..., :embed_dim].reshape(grid_h * grid_w, embed_dim)  # (Timg, D)
+    # zero-mean per dim (optional but helps avoid a DC bias)
+    pe = pe - pe.mean(dim=0, keepdim=True)
+    return pe
+
 class vit_models(nn.Module):
     """ Vision Transformer with LayerScale (https://arxiv.org/abs/2103.17239) support
     taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
@@ -35,7 +56,7 @@ class vit_models(nn.Module):
                 **kwargs):
         super().__init__()
 
-        self.num_reg_tokens = 16
+        # self.num_reg_tokens = 16
         self.num_classes = num_classes
         self.embed_dim = embed_dim
 
@@ -46,9 +67,12 @@ class vit_models(nn.Module):
         self.grid_size = self.patch_embed.grid_size
         self.img_size = img_size
 
-        self.register_tokens = nn.Parameter(torch.zeros(1, self.num_reg_tokens, embed_dim))
+        # self.register_tokens = nn.Parameter(torch.zeros(1, self.num_reg_tokens, embed_dim))
 
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
+        Gh, Gw = self.grid_size
+        pos = _make_sincos_pos_embed(self.embed_dim, Gh, Gw)  # (Timg, D)
+        self.register_buffer('pos_embed', pos.unsqueeze(0), persistent=False)  # (1, Timg, D)
+        # self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
 
         dpr = [drop_path_rate for i in range(depth)]
         self.blocks = nn.ModuleList([
@@ -61,8 +85,8 @@ class vit_models(nn.Module):
             
         self.norm = norm_layer(embed_dim)
 
-        trunc_normal_(self.pos_embed, std=.02)
-        trunc_normal_(self.register_tokens, std=.02)
+        # trunc_normal_(self.pos_embed, std=.02)
+        # trunc_normal_(self.register_tokens, std=.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -76,7 +100,7 @@ class vit_models(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'pos_embed', 'register_tokens'}
+        return {'pos_embed'}#, 'register_tokens'}
     
     def get_num_layers(self):
         return len(self.blocks)
@@ -87,8 +111,8 @@ class vit_models(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
         x = x + self.pos_embed
-        register_tokens = self.register_tokens.expand(B, -1, -1)
-        x = torch.cat((x, register_tokens), dim=1)
+        # register_tokens = self.register_tokens.expand(B, -1, -1)
+        # x = torch.cat((x, register_tokens), dim=1)
         
         # Apply blocks
         for i , blk in enumerate(self.blocks):
@@ -97,8 +121,8 @@ class vit_models(nn.Module):
         # Normalize final output
         x = self.norm(x)
 
-        # Remove register tokens
-        x = x[:, :-self.num_reg_tokens]
+        # # Remove register tokens
+        # x = x[:, :-self.num_reg_tokens]
 
         # 2-D Retinotopic positions (each patch center position, expanded across batch)
         # It should be a variable called "ret2D" with shape (B, Timg, 2)
