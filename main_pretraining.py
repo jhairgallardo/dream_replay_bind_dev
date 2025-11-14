@@ -24,16 +24,15 @@ from PIL import Image
 from lightning.fabric import Fabric
 from lightning.fabric.loggers import CSVLogger, TensorBoardLogger
 
+import matplotlib.pyplot as plt
+
 parser = argparse.ArgumentParser(description='Pre-training Dream Replay Bind')
 ### Dataset parameters
 parser.add_argument('--data_path', type=str, default='/data/datasets/caltech256/256_ObjectCategories_splits')
 parser.add_argument('--val_episode_seed', type=int, default=12345)
 parser.add_argument('--num_classes', type=int, default=256)
-# parser.add_argument('--mean', type=list, default=[0.5, 0.5, 0.5])
-# parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5])
-# parser.add_argument('--channels', type=int, default=3)
-parser.add_argument('--mean', type=list, default=[0.5, 0.5, 0.5, 0.0])
-parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5, 1.0])
+parser.add_argument('--mean', type=list, default=[0.5, 0.5, 0.5])
+parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5])
 parser.add_argument('--channels', type=int, default=4)
 parser.add_argument('--only_crop', action='store_true', default=False)
 ### View encoder parameters
@@ -111,6 +110,11 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+    ### If 4 channel, add a 4th dimension to mean and std with 0 and 1 respectively
+    if args.channels == 4:
+        args.mean = args.mean + [0.0]
+        args.std = args.std + [1.0]
+
     ### Print args
     fabric.print(args)
 
@@ -129,7 +133,7 @@ def main():
                                               zoom_range = (args.zoom_min, args.zoom_max), only_crop=args.only_crop)
     train_dataset = ImageFolder(traindir, transform=train_transform)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.episode_batch_size, shuffle=True,
-                                               num_workers=args.workers, pin_memory=True, persistent_workers=True,
+                                               num_workers=args.workers, pin_memory=True, persistent_workers=True, drop_last=True,
                                                collate_fn=collate_function_notaskid)
     train_loader = fabric.setup_dataloaders(train_loader)
 
@@ -216,13 +220,13 @@ def main():
     total_steps = args.epochs * steps_per_epoch
     warmup_steps = args.warmup_epochs * steps_per_epoch
     linear_warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer=optimizer, start_factor=1e-3, total_iters=warmup_steps)
-    # cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps-warmup_steps, eta_min=0)
-    # scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [linear_warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps-warmup_steps, eta_min=0)
+    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [linear_warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
     # 2 LR drops at ~60% and ~85% of training (in steps, measured AFTER warmup starts)
-    m1 = max(int(0.60 * total_steps) - warmup_steps, 1)
-    m2 = max(int(0.85 * total_steps) - warmup_steps, m1 + 1)
-    multi_step_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[m1, m2], gamma=0.2)
-    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [linear_warmup_scheduler, multi_step_scheduler], milestones=[warmup_steps])
+    # m1 = max(int(0.60 * total_steps) - warmup_steps, 1)
+    # m2 = max(int(0.85 * total_steps) - warmup_steps, m1 + 1)
+    # multi_step_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[m1, m2], gamma=0.2)
+    # scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [linear_warmup_scheduler, multi_step_scheduler], milestones=[warmup_steps])
 
     ### Save one batch for plot purposes
     fabric.seed_everything(args.seed)  # Reset seed to ensure reproducibility for the plot batch
@@ -336,6 +340,10 @@ def main():
                 # loss_bce = F.binary_cross_entropy_with_logits(logits, batch_labels_onehot, pos_weight=pos_weight)
 
                 # Calculate Total loss for the batch
+                # if epoch<3:
+                #     w_mse2 = 0.0
+                # else:
+                #     w_mse2 = 1.0
                 loss_mse_total = loss_mse_1 + loss_mse_2
                 # loss_total = args.coeff_mse * loss_mse_total + args.coeff_bce * loss_bce
                 loss_total = args.coeff_mse * loss_mse_total
@@ -459,6 +467,83 @@ def main():
                 flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D)
                 noflat_PRED2_imgfttoks = flat_PRED2_imgfttoks.view(B, V, flat_PRED2_imgfttoks.size(1), -1) # (B, V, Timg, Dimg)
 
+                ##############################################################################################################
+                # On every first validation batch, let's plot mean token and std token (for patch and for action)
+                if j==0 and fabric.is_global_zero:
+                    # Plot patch tokens
+                    tok_means = flat_imgfttoks.mean(dim=(0, 1)).detach().float().cpu().numpy()  # (D,)
+                    tok_stds = flat_imgfttoks.std(dim=(0, 1), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    dims = np.arange(tok_means.shape[0])
+                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    axs[0].bar(dims, tok_means)
+                    axs[0].set_title('PatchToken (View encoder) mean per dimension')
+                    axs[0].set_xlabel('Dimension')
+                    axs[0].set_ylabel('Mean')
+                    axs[1].bar(dims, tok_stds, color='orange')
+                    axs[1].set_title('PatchToken (View encoder) std per dimension')
+                    axs[1].set_xlabel('Dimension')
+                    axs[1].set_ylabel('Std')
+                    save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
+                    if not os.path.exists(save_plot_dir):
+                        os.makedirs(save_plot_dir)
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_viewencoder.png'))
+                    plt.close(fig)
+                    # Plot patch tokens after seek
+                    tok_means = noflat_PRED_imgfttoks.mean(dim=(0, 1, 2)).detach().float().cpu().numpy()  # (D,)
+                    tok_stds = noflat_PRED_imgfttoks.std(dim=(0, 1, 2), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    dims = np.arange(tok_means.shape[0])
+                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    axs[0].bar(dims, tok_means)
+                    axs[0].set_title('PatchToken (Seek) mean per dimension')
+                    axs[0].set_xlabel('Dimension')
+                    axs[0].set_ylabel('Mean')
+                    axs[1].bar(dims, tok_stds, color='orange')
+                    axs[1].set_title('PatchToken (Seek) std per dimension')
+                    axs[1].set_xlabel('Dimension')
+                    axs[1].set_ylabel('Std')
+                    save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
+                    if not os.path.exists(save_plot_dir):
+                        os.makedirs(save_plot_dir)
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_seek.png'))
+                    plt.close(fig)
+                    # Plot patch token after generatorviewencoder
+                    tok_means = noflat_PRED2_imgfttoks.mean(dim=(0, 1, 2)).detach().float().cpu().numpy()  # (D,)
+                    tok_stds = noflat_PRED2_imgfttoks.std(dim=(0, 1, 2), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    dims = np.arange(tok_means.shape[0])
+                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    axs[0].bar(dims, tok_means)
+                    axs[0].set_title('PatchToken (Generator+View encoder) mean per dimension')
+                    axs[0].set_xlabel('Dimension')
+                    axs[0].set_ylabel('Mean')
+                    axs[1].bar(dims, tok_stds, color='orange')
+                    axs[1].set_title('PatchToken (Generator+View encoder) std per dimension')
+                    axs[1].set_xlabel('Dimension')
+                    axs[1].set_ylabel('Std')
+                    save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
+                    if not os.path.exists(save_plot_dir):
+                        os.makedirs(save_plot_dir)
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_generatorviewencoder.png'))
+                    plt.close(fig)
+                    # Plot action tokens
+                    tok_means = flat_acttok.mean(dim=(0, 1)).detach().float().cpu().numpy()  # (D,)
+                    tok_stds = flat_acttok.std(dim=(0, 1), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    dims = np.arange(tok_means.shape[0])
+                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    axs[0].bar(dims, tok_means)
+                    axs[0].set_title('ActionToken (Action encoder) mean per dimension')
+                    axs[0].set_xlabel('Dimension')
+                    axs[0].set_ylabel('Mean')
+                    axs[1].bar(dims, tok_stds, color='orange')
+                    axs[1].set_title('ActionToken (Action encoder) std per dimension')
+                    axs[1].set_xlabel('Dimension')
+                    axs[1].set_ylabel('Std')
+                    save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
+                    if not os.path.exists(save_plot_dir):
+                        os.makedirs(save_plot_dir)
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_actiontoken_actionencoder.png'))
+                    plt.close(fig)
+
+
                 # # Bind forward pass
                 # canvas = bind(noflat_acttok, noflat_imgfttoks, noflat_ret2D, batch_episodes_actions) # (B, num_queries, Dhidden)
 
@@ -578,7 +663,9 @@ def main():
                         episode_i_gen_imgs_4th_channel = episode_i_gen_imgs_4th_channel.repeat(1, 3, 1, 1) # (V, 3, H, W)
                         episode_i_imgs = episode_i_imgs[:, :3, :, :] # (V, 3, H, W)
                         episode_i_gen_imgs = episode_i_gen_imgs[:, :3, :, :] # (V, 3, H, W) 
-                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs, episode_i_gen_imgs_4th_channel], dim=0), nrow=args.num_views)
+                        grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs, episode_i_gen_imgs_4th_channel], dim=0), nrow=args.num_views)
+                    else:
+                        grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs], dim=0), nrow=args.num_views)
                     grid = grid.permute(1, 2, 0).cpu().numpy()
                     grid = (grid * 255).astype(np.uint8)
                     grid = Image.fromarray(grid)
@@ -625,7 +712,9 @@ def main():
                         episode_i_gen_imgs_4th_channel = episode_i_gen_imgs_4th_channel.repeat(1, 3, 1, 1) # (V, 3, H, W)
                         episode_i_imgs = episode_i_imgs[:, :3, :, :] # (V, 3, H, W)
                         episode_i_gen_imgs = episode_i_gen_imgs[:, :3, :, :] # (V, 3, H, W)
-                    grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs, episode_i_gen_imgs_4th_channel], dim=0), nrow=args.num_views)
+                        grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs, episode_i_gen_imgs_4th_channel], dim=0), nrow=args.num_views)
+                    else:
+                        grid = torchvision.utils.make_grid(torch.cat([episode_i_imgs, episode_i_gen_imgs], dim=0), nrow=args.num_views)
                     grid = grid.permute(1, 2, 0).cpu().numpy()
                     grid = (grid * 255).astype(np.uint8)
                     grid = Image.fromarray(grid)
@@ -639,6 +728,9 @@ def main():
         epoch_time = time.time() - start_time
         elapsed_time = time.time() - init_time
         fabric.print(f"Epoch [{epoch}] Epoch Time: {time_duration_print(epoch_time)} -- Elapsed Time: {time_duration_print(elapsed_time)}")
+
+        if epoch==50: # Break at epoch = 50 to save time for debugging
+            break
 
     return None
 
