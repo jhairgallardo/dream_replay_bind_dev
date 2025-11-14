@@ -49,17 +49,17 @@ class AugTokenizerSparse(nn.Module):
 
         if only_crop:
             self.proj = nn.ModuleDict({
-                "crop"  : nn.Linear(4, d_linparam), # process 4 params
+                "crop"  : nn.Linear(4, d_linparam, bias=True), # process 4 params
             })
         else:
             self.proj = nn.ModuleDict({
-                "crop"  : nn.Linear(4, d_linparam), # process 4 params
-                # "hflip" : None,                  # no params to process
-                "jitter": nn.Linear(7, d_linparam), # process 7 params
-                "gray"  : None,                  # no params to process
-                "blur"  : nn.Linear(1, d_linparam), # process 1 param
-                "solar" : nn.Linear(1, d_linparam), # process 1 param
-                # "none"  : None,                  # no params to process
+                "crop"  : nn.Linear(4, d_linparam, bias=True), # process 4 params
+                # "hflip" : None,                              # no params to process
+                "jitter": nn.Linear(7, d_linparam, bias=True), # process 7 params
+                "gray"  : None,                                # no params to process
+                "blur"  : nn.Linear(1, d_linparam, bias=True), # process 1 param
+                "solar" : nn.Linear(1, d_linparam, bias=True), # process 1 param
+                # "none"  : None,                              # no params to process
             })
 
         self.pad_emb  = nn.Parameter(torch.zeros(1, self.d))   # <PAD>
@@ -139,12 +139,12 @@ class Action_Encoder_Network(nn.Module):
             Layer_scale_init_Block_SA(
                 dim=d_model,
                 num_heads=n_heads,
-                qkv_bias=True, # False
+                qkv_bias=True,
                 drop=dropout,
                 attn_drop=dropout,
                 drop_path=dpr[i],
-                proj_bias=True, # False
-                Mlp_bias=True, # False
+                proj_bias=False,
+                Mlp_bias=False,
             ) for i in range(n_layers)
         ])
         self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
@@ -154,7 +154,7 @@ class Action_Encoder_Network(nn.Module):
         self.num_q     = num_queries
         self.pool_q    = nn.Parameter(torch.zeros(num_queries, d_model))  # (k, D)
         trunc_normal_(self.pool_q, std=0.02)
-        # self.normalize_q = nn.RMSNorm(d_model, eps=1e-6)
+        self.normalize_q = nn.RMSNorm(d_model, eps=1e-6)
 
         # # cross-attn to pool: Q=pool_q, K=enc_out, V=enc_out
         self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=True, # False
@@ -163,10 +163,21 @@ class Action_Encoder_Network(nn.Module):
         # Output normalization
         # self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
 
+        self.apply(self._init_weights)
+
     @torch.jit.ignore
     def no_weight_decay(self):
-        names = {"pool_q", "aug_tokeniser.type_emb.weight", "aug_tokeniser.pad_emb"}
+        names = {"aug_tokeniser.type_emb.weight", "aug_tokeniser.pad_emb"}
         return names
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.RMSNorm):
+            # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
+            nn.init.constant_(m.weight, 1.0)
 
     def forward(self, actions):
         # Actions are (B*V, A)
@@ -194,7 +205,7 @@ class Action_Encoder_Network(nn.Module):
 
         # Expand k queries to batch
         q = self.pool_q.unsqueeze(0).expand(N, -1, -1)   # (N, k, D)
-        # q = self.normalize_q(q)
+        q = self.normalize_q(q)
 
         # Cross-attention pooling with your Attention block
         summaries = self.pool_attn(q, memory=h, attn_mask=mask)  # (N, k, D)
