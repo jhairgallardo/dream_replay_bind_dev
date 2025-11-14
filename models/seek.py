@@ -74,11 +74,11 @@ class Seek_Network(nn.Module):
         self.hidden_dim = d_model
 
         ### Input projections per token type
-        self.acttok_mlp_in    = nn.Linear(acttok_dim, self.hidden_dim, bias=False)
-        self.retpatch_mlp_in  = nn.Linear(imgfttok_dim+ret2d_dim, self.hidden_dim, bias=False)
+        self.acttok_mlp_in    = nn.Linear(acttok_dim, self.hidden_dim, bias=True) # False
+        self.retpatch_mlp_in  = nn.Linear(imgfttok_dim+ret2d_dim, self.hidden_dim, bias=True) # False
         
         ### Output projections per token type
-        self.retpatch_mlp_out = nn.Linear(self.hidden_dim, imgfttok_dim+ret2d_dim, bias=False)
+        self.retpatch_mlp_out = nn.Linear(self.hidden_dim, imgfttok_dim+ret2d_dim, bias=True) # False
 
         ### Norm out (Normalize predicted patch tokens output)
         self.norm_out = nn.RMSNorm(imgfttok_dim, eps=1e-6)
@@ -98,7 +98,7 @@ class Seek_Network(nn.Module):
             Layer_scale_init_BlockFiLM_SA(
                 dim=self.hidden_dim,
                 num_heads=nhead,
-                qkv_bias=False,
+                qkv_bias=True,
                 drop=dropout,
                 attn_drop=dropout,
                 drop_path=dpr[i],
@@ -116,9 +116,20 @@ class Seek_Network(nn.Module):
         self.type_emb_mask_retpatchtok = nn.Parameter(torch.zeros(self.hidden_dim))
         trunc_normal_(self.type_emb_mask_retpatchtok, std=0.02)
 
+        self.apply(self._init_weights)
+
     @torch.jit.ignore
     def no_weight_decay(self):
         return {}
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.RMSNorm):
+            # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
+            nn.init.constant_(m.weight, 1.0)
 
     def forward(self, noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv=None):
         """
