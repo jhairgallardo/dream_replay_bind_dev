@@ -42,10 +42,6 @@ class BasicBlockDec(nn.Module):
         out = self.act(out)
         return out
 
-# def inv_softplus(y: float) -> float:
-#     # returns x s.t. softplus(x) = y
-#     return math.log(math.exp(y) - 1.0)
-
 class Generator_Network(nn.Module):
     def __init__(self,
                  in_planes=192,
@@ -54,11 +50,6 @@ class Generator_Network(nn.Module):
         super().__init__()
         self.in_planes = in_planes
         # self.out_act = lambda x: torch.tanh(x)
-
-        # ---- learnable per-channel alpha (shape 1×C×1×1), positive via softplus
-        # initialize so softplus(alpha_raw) ~= init_alpha
-        # a0 = inv_softplus(init_alpha)
-        # self.alpha_raw = nn.Parameter(torch.full((1, nc, 1, 1), a0))
 
         self.alpha_raw = nn.Parameter(torch.zeros((1, nc, 1, 1)))
         self.gamma_raw = nn.Parameter(torch.zeros((1, nc, 1, 1)))
@@ -118,13 +109,9 @@ class Generator_Network(nn.Module):
         x = self.layer3(x) # (B*V, 128, 28, 28)
         x = self.layer2(x) # (B*V, 64, 56, 56)
         x = self.layer1(x) # (B*V, 64, 112, 112)
-        logits = self.conv1(x) # (B*V, 3, 224, 224)
+        logits = self.conv1(x) # (B*V, nc, 224, 224)
 
-        # x = self.out_act(logits) # (B*V, 3, 224, 224)
-
-        # Final activation
-        # alpha = F.softplus(self.alpha_raw) + 1e-4        # (1, C, 1, 1), strictly > 0
-        # x = torch.tanh(alpha * logits)                   # (B*V, C, 224, 224)
+        # x = self.out_act(logits) # (B*V, nc, 224, 224)
 
         self.alpha = self._param_in_range(self.alpha_raw, 0.8, 1.2)
         self.gamma = self._param_in_range(self.gamma_raw, 0.8, 1.2)
