@@ -16,6 +16,7 @@ from models.generator import Generator_Network
 from models.classifier import Classifier_Network
 
 from utils import MetricLogger, accuracy, time_duration_print, build_stratified_indices, make_plot_batch, make_param_group, extract_crop_params_from_raw
+from utils import seed_everything_with_fabric
 
 import numpy as np
 import json
@@ -103,12 +104,7 @@ def main():
     fabric.launch()
 
     ### Seed everything
-    fabric.seed_everything(args.seed)
-    # seed torch gpu
-    torch.cuda.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    seed_everything_with_fabric(args.seed, fabric)
 
     ### If 4 channel, add a 4th dimension to mean and std with 0 and 1 respectively
     if args.channels == 4:
@@ -229,7 +225,7 @@ def main():
     # scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, [linear_warmup_scheduler, multi_step_scheduler], milestones=[warmup_steps])
 
     ### Save one batch for plot purposes
-    fabric.seed_everything(args.seed)  # Reset seed to ensure reproducibility for the plot batch
+    seed_everything_with_fabric(args.seed, fabric)  # Reset seed to ensure reproducibility for the plot batch
     if fabric.is_global_zero:
         PLOT_N = 16
         # Training batch
@@ -266,6 +262,9 @@ def main():
     #### Train and Validation loop ####
     fabric.print('\n==> Training and Validating model')
     init_time = time.time()
+
+    # Seed right before training and validation starts
+    seed_everything_with_fabric(args.seed, fabric)
 
     for epoch in range(args.epochs):
         start_time = time.time()
@@ -473,8 +472,9 @@ def main():
                     # Plot patch tokens
                     tok_means = flat_imgfttoks.mean(dim=(0, 1)).detach().float().cpu().numpy()  # (D,)
                     tok_stds = flat_imgfttoks.std(dim=(0, 1), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    tok_mean_abs = torch.abs(flat_imgfttoks).mean(dim=(0, 1)).detach().float().cpu().numpy()  # (D,)
                     dims = np.arange(tok_means.shape[0])
-                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    fig, axs = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
                     axs[0].bar(dims, tok_means)
                     axs[0].set_title('PatchToken (View encoder) mean per dimension')
                     axs[0].set_xlabel('Dimension')
@@ -483,16 +483,25 @@ def main():
                     axs[1].set_title('PatchToken (View encoder) std per dimension')
                     axs[1].set_xlabel('Dimension')
                     axs[1].set_ylabel('Std')
+                    axs[2].bar(dims, tok_mean_abs)
+                    axs[2].set_title('PatchToken (View encoder) mean absolute value per dimension')
+                    axs[2].set_xlabel('Dimension')
+                    axs[2].set_ylabel('Mean Absolute Value')
                     save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
                     if not os.path.exists(save_plot_dir):
                         os.makedirs(save_plot_dir)
-                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_viewencoder.png'))
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_stats_viewencoder.png'))
                     plt.close(fig)
+                    if epoch==0 or ((epoch+1) % 10 == 0):
+                        # Also save the patch tokens as a numpy array
+                        np.save(os.path.join(save_plot_dir, f'epoch{epoch}_patchtokens_tensor_viewencoder.npy'), flat_imgfttoks.detach().float().cpu().numpy())
+                
                     # Plot patch tokens after seek
                     tok_means = noflat_PRED_imgfttoks.mean(dim=(0, 1, 2)).detach().float().cpu().numpy()  # (D,)
                     tok_stds = noflat_PRED_imgfttoks.std(dim=(0, 1, 2), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    tok_mean_abs = torch.abs(noflat_PRED_imgfttoks).mean(dim=(0, 1, 2)).detach().float().cpu().numpy()  # (D,)
                     dims = np.arange(tok_means.shape[0])
-                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    fig, axs = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
                     axs[0].bar(dims, tok_means)
                     axs[0].set_title('PatchToken (Seek) mean per dimension')
                     axs[0].set_xlabel('Dimension')
@@ -501,16 +510,25 @@ def main():
                     axs[1].set_title('PatchToken (Seek) std per dimension')
                     axs[1].set_xlabel('Dimension')
                     axs[1].set_ylabel('Std')
+                    axs[2].bar(dims, tok_mean_abs)
+                    axs[2].set_title('PatchToken (Seek) mean absolute value per dimension')
+                    axs[2].set_xlabel('Dimension')
+                    axs[2].set_ylabel('Mean Absolute Value')
                     save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
                     if not os.path.exists(save_plot_dir):
                         os.makedirs(save_plot_dir)
-                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_seek.png'))
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_stats_seek.png'))
                     plt.close(fig)
+                    if epoch==0 or ((epoch+1) % 10 == 0):
+                        # Also save the patch tokens as a numpy array
+                        np.save(os.path.join(save_plot_dir, f'epoch{epoch}_patchtokens_tensor_seek.npy'), noflat_PRED_imgfttoks.detach().float().cpu().numpy())
+                    
                     # Plot patch token after generatorviewencoder
                     tok_means = noflat_PRED2_imgfttoks.mean(dim=(0, 1, 2)).detach().float().cpu().numpy()  # (D,)
                     tok_stds = noflat_PRED2_imgfttoks.std(dim=(0, 1, 2), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    tok_mean_abs = torch.abs(noflat_PRED2_imgfttoks).mean(dim=(0, 1, 2)).detach().float().cpu().numpy()  # (D,)
                     dims = np.arange(tok_means.shape[0])
-                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    fig, axs = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
                     axs[0].bar(dims, tok_means)
                     axs[0].set_title('PatchToken (Generator+View encoder) mean per dimension')
                     axs[0].set_xlabel('Dimension')
@@ -519,16 +537,25 @@ def main():
                     axs[1].set_title('PatchToken (Generator+View encoder) std per dimension')
                     axs[1].set_xlabel('Dimension')
                     axs[1].set_ylabel('Std')
+                    axs[2].bar(dims, tok_mean_abs)
+                    axs[2].set_title('PatchToken (Generator+View encoder) mean absolute value per dimension')
+                    axs[2].set_xlabel('Dimension')
+                    axs[2].set_ylabel('Mean Absolute Value')
                     save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
                     if not os.path.exists(save_plot_dir):
                         os.makedirs(save_plot_dir)
-                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_generatorviewencoder.png'))
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_patchtoken_stats_generatorviewencoder.png'))
                     plt.close(fig)
+                    if epoch==0 or ((epoch+1) % 10 == 0):
+                        # Also save the patch tokens as a numpy array
+                        np.save(os.path.join(save_plot_dir, f'epoch{epoch}_patchtokens_tensor_generatorviewencoder.npy'), noflat_PRED2_imgfttoks.detach().float().cpu().numpy())
+
                     # Plot action tokens
                     tok_means = flat_acttok.mean(dim=(0, 1)).detach().float().cpu().numpy()  # (D,)
                     tok_stds = flat_acttok.std(dim=(0, 1), unbiased=False).detach().float().cpu().numpy()  # (D,)
+                    tok_mean_abs = torch.abs(flat_acttok).mean(dim=(0, 1)).detach().float().cpu().numpy()  # (D,)
                     dims = np.arange(tok_means.shape[0])
-                    fig, axs = plt.subplots(2, 1, figsize=(12, 6), constrained_layout=True)
+                    fig, axs = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
                     axs[0].bar(dims, tok_means)
                     axs[0].set_title('ActionToken (Action encoder) mean per dimension')
                     axs[0].set_xlabel('Dimension')
@@ -537,11 +564,18 @@ def main():
                     axs[1].set_title('ActionToken (Action encoder) std per dimension')
                     axs[1].set_xlabel('Dimension')
                     axs[1].set_ylabel('Std')
+                    axs[2].bar(dims, tok_mean_abs)
+                    axs[2].set_title('ActionToken (Action encoder) mean absolute value per dimension')
+                    axs[2].set_xlabel('Dimension')
+                    axs[2].set_ylabel('Mean Absolute Value')
                     save_plot_dir = os.path.join(args.save_dir, 'Token_stats_val')
                     if not os.path.exists(save_plot_dir):
                         os.makedirs(save_plot_dir)
-                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_actiontoken_actionencoder.png'))
+                    fig.savefig(os.path.join(save_plot_dir, f'epoch{epoch}_actiontoken_stats_actionencoder.png'))
                     plt.close(fig)
+                    if epoch==0 or ((epoch+1) % 10 == 0):
+                        # Also save the action tokens as a numpy array
+                        np.save(os.path.join(save_plot_dir, f'epoch{epoch}_actiontokens_tensor_actionencoder.npy'), flat_acttok.detach().float().cpu().numpy())
 
 
                 # # Bind forward pass
@@ -729,8 +763,8 @@ def main():
         elapsed_time = time.time() - init_time
         fabric.print(f"Epoch [{epoch}] Epoch Time: {time_duration_print(epoch_time)} -- Elapsed Time: {time_duration_print(elapsed_time)}")
 
-        if epoch==50: # Break at epoch = 50 to save time for debugging
-            break
+        # if epoch==50: # Break at epoch = 50 to save time for debugging
+        #     break
 
     return None
 

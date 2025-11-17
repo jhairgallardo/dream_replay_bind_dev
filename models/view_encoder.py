@@ -56,7 +56,7 @@ class vit_models(nn.Module):
                 **kwargs):
         super().__init__()
 
-        # self.num_reg_tokens = 16
+        self.num_reg_tokens = 8
         self.num_classes = num_classes
         self.embed_dim = embed_dim
 
@@ -67,12 +67,11 @@ class vit_models(nn.Module):
         self.grid_size = self.patch_embed.grid_size
         self.img_size = img_size
 
-        # self.register_tokens = nn.Parameter(torch.zeros(1, self.num_reg_tokens, embed_dim))
+        self.register_tokens = nn.Parameter(torch.zeros(1, self.num_reg_tokens, self.embed_dim))
 
         Gh, Gw = self.grid_size
         pos = _make_sincos_pos_embed(self.embed_dim, Gh, Gw)  # (Timg, D)
         self.register_buffer('pos_embed', pos.unsqueeze(0), persistent=False)  # (1, Timg, D)
-        # self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches, embed_dim))
 
         dpr = [drop_path_rate for i in range(depth)]
         self.blocks = nn.ModuleList([
@@ -85,8 +84,7 @@ class vit_models(nn.Module):
             
         self.norm = norm_layer(embed_dim)
 
-        # trunc_normal_(self.pos_embed, std=.02)
-        # trunc_normal_(self.register_tokens, std=.02)
+        trunc_normal_(self.register_tokens, std=.02)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -100,7 +98,7 @@ class vit_models(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'pos_embed'}#, 'register_tokens'}
+        return {'pos_embed'}
     
     def get_num_layers(self):
         return len(self.blocks)
@@ -111,8 +109,8 @@ class vit_models(nn.Module):
         B = x.shape[0]
         x = self.patch_embed(x)
         x = x + self.pos_embed
-        # register_tokens = self.register_tokens.expand(B, -1, -1)
-        # x = torch.cat((x, register_tokens), dim=1)
+        register_tokens = self.register_tokens.expand(B, -1, -1)
+        x = torch.cat((x, register_tokens), dim=1)
         
         # Apply blocks
         for i , blk in enumerate(self.blocks):
@@ -121,8 +119,8 @@ class vit_models(nn.Module):
         # Normalize final output
         x = self.norm(x)
 
-        # # Remove register tokens
-        # x = x[:, :-self.num_reg_tokens]
+        # Remove register tokens
+        x = x[:, :-self.num_reg_tokens]
 
         # 2-D Retinotopic positions (each patch center position, expanded across batch)
         # It should be a variable called "ret2D" with shape (B, Timg, 2)
@@ -152,36 +150,36 @@ class vit_models(nn.Module):
 
 def deit_tiny_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        img_size = img_size, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
         norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
     
 def deit_small_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        img_size = img_size, patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
         norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
 
 def deit_medium_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=512, depth=12, num_heads=8, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        img_size = img_size, patch_size=16, embed_dim=512, depth=12, num_heads=8, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
         norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
     return model 
 
 def deit_base_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        img_size = img_size, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
         norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
     
 def deit_large_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        img_size = img_size, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
         norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
 
 def deit_huge_patch14_LS(pretrained=False, img_size=224, pretrained_21k = False,  **kwargs):
     model = vit_models(
-        img_size = img_size, patch_size=14, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=False, proj_bias=False, Mlp_bias=False,
+        img_size = img_size, patch_size=14, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
         norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
     return model

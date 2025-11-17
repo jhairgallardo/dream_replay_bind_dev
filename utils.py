@@ -9,6 +9,18 @@ from PIL import Image
 from collections import defaultdict
 
 import torch.nn as nn
+import random
+
+def seed_everything_with_fabric(seed: int, fabric):
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    random.seed(seed)
+    np.random.seed(seed)
+    fabric.seed_everything(seed)
 
 def extract_crop_params_from_raw(noflat_raw_actions, device):
     """
