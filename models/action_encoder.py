@@ -160,8 +160,10 @@ class Action_Encoder_Network(nn.Module):
         self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=True, # False
                                    attn_drop=dropout, proj_drop=dropout, proj_bias=True) # False
 
+        self.pool_proj = nn.Linear(num_queries * d_model, d_model)
+
         # Output normalization
-        # self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
+        self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
 
         self.apply(self._init_weights)
 
@@ -210,7 +212,13 @@ class Action_Encoder_Network(nn.Module):
         # Cross-attention pooling with your Attention block
         summaries = self.pool_attn(q, memory=h, attn_mask=mask)  # (N, k, D)
 
-        # Collapse k → 1 by mean
-        summary = summaries.mean(dim=1, keepdim=True)    # (N, 1, D)
+        # # Collapse k → 1 by mean
+        # summary = summaries.mean(dim=1, keepdim=True)    # (N, 1, D)
         # summary = self.norm_out(summary)
+
+        # Collapse k → 1 by projection
+        summaries_concat = summaries.reshape(N, -1) # (N, k*D)
+        summary = self.pool_proj(summaries_concat).unsqueeze(1)    # (N, 1, D)
+        summary = self.norm_out(summary)
+
         return summary
