@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from functools import partial
 
 from timm.layers import trunc_normal_
 from torch.nn.utils.rnn import pad_sequence
@@ -145,16 +146,17 @@ class Action_Encoder_Network(nn.Module):
                 drop_path=dpr[i],
                 proj_bias=False,
                 Mlp_bias=False,
+                norm_layer=partial(nn.LayerNorm, eps=1e-6)
             ) for i in range(n_layers)
         ])
-        self.final_norm = nn.RMSNorm(d_model, eps=1e-6)
+        self.final_norm = nn.LayerNorm(d_model, eps=1e-6)
 
         # k learnable queries to pool L -> k
         num_queries = 4
         self.num_q     = num_queries
         self.pool_q    = nn.Parameter(torch.zeros(num_queries, d_model))  # (k, D)
         trunc_normal_(self.pool_q, std=0.02)
-        self.normalize_q = nn.RMSNorm(d_model, eps=1e-6)
+        self.normalize_q = nn.LayerNorm(d_model, eps=1e-6)
 
         # # cross-attn to pool: Q=pool_q, K=enc_out, V=enc_out
         self.pool_attn = Attention(d_model, num_heads=n_heads, qkv_bias=True, # False
@@ -163,7 +165,7 @@ class Action_Encoder_Network(nn.Module):
         self.pool_proj = nn.Linear(num_queries * d_model, d_model)
 
         # Output normalization
-        self.norm_out = nn.RMSNorm(d_model, eps=1e-6)
+        self.norm_out = nn.LayerNorm(d_model, eps=1e-6)
 
         self.apply(self._init_weights)
 
@@ -177,8 +179,8 @@ class Action_Encoder_Network(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.RMSNorm):
-            # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0.0)
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, actions):

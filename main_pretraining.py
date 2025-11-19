@@ -282,7 +282,13 @@ def main():
         # train_acc1 = MetricLogger('Train Top1 ACC')
         # train_acc5 = MetricLogger('Train Top5 ACC')
 
+        # if epoch < 0:
         view_encoder.train()
+        # else:
+        #     view_encoder.eval()
+        #     # freeze view encoder
+        #     for param in view_encoder.parameters():
+        #         param.requires_grad = False
         action_encoder.train()
         seek.train()
         # bind.train()

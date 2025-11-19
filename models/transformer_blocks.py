@@ -63,7 +63,7 @@ class Attention(nn.Module):
 class Block_SA(nn.Module): # Self-Attention Block
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     def __init__(self, dim, num_heads, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.RMSNorm, Attention_block=Attention, Mlp_block=SwiGLU,
+                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.LayerNorm, Attention_block=Attention, Mlp_block=SwiGLU,
                  init_values=1e-4, proj_bias=False, Mlp_bias=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -84,7 +84,7 @@ class Layer_scale_init_Block_SA(nn.Module): # Self-Attention Block with LayerSca
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     # with slight modifications
     def __init__(self, dim, num_heads, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.RMSNorm, Attention_block=Attention,Mlp_block=SwiGLU,
+                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.LayerNorm, Attention_block=Attention,Mlp_block=SwiGLU,
                  init_values=1e-4, proj_bias=False, Mlp_bias=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -106,7 +106,7 @@ class Layer_scale_init_Block_SA(nn.Module): # Self-Attention Block with LayerSca
 class Block_CA(nn.Module): # Cross-Attention Block
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     def __init__(self, dim, num_heads, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.RMSNorm, Attention_block=Attention, Mlp_block=SwiGLU,
+                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.LayerNorm, Attention_block=Attention, Mlp_block=SwiGLU,
                  init_values=1e-4, proj_bias=False, Mlp_bias=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -134,7 +134,7 @@ class Layer_scale_init_Block_CA(nn.Module): # Cross-Attention Block with LayerSc
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     # with slight modifications
     def __init__(self, dim, num_heads, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.RMSNorm, Attention_block=Attention, Mlp_block=SwiGLU,
+                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.LayerNorm, Attention_block=Attention, Mlp_block=SwiGLU,
                  init_values=1e-4, proj_bias=False, Mlp_bias=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -214,7 +214,7 @@ class AttentionFiLM(nn.Module):
 class BlockFiLM_SA(nn.Module): # Self-Attention Block
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     def __init__(self, dim, num_heads, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.RMSNorm, Attention_block=AttentionFiLM, Mlp_block=SwiGLU,
+                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.LayerNorm, Attention_block=AttentionFiLM, Mlp_block=SwiGLU,
                  init_values=1e-4, proj_bias=False, Mlp_bias=False):
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -246,7 +246,7 @@ class Layer_scale_init_BlockFiLM_SA(nn.Module): # Self-Attention Block with Laye
     # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
     # with slight modifications
     def __init__(self, dim, num_heads, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.RMSNorm, Attention_block=AttentionFiLM, Mlp_block=SwiGLU,
+                 drop_path=0., act_layer=nn.SiLU, norm_layer=nn.LayerNorm, Attention_block=AttentionFiLM, Mlp_block=SwiGLU,
                  init_values=1e-4, proj_bias=False, Mlp_bias=False):
         super().__init__()
         self.norm1 = norm_layer(dim)

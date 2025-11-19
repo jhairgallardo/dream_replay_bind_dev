@@ -17,7 +17,6 @@ from timm.layers import to_2tuple, trunc_normal_
 # -> No dropout for head since there is no head
 # -> Added 2-D Retinotopic positions (each patch center position, expanded across batch)
 # -> No Bias
-# -> Replace LayerNorm with RMSNorm
 # -> Replace Mlp with SwiGLU
 
 def _make_sincos_pos_embed(embed_dim, grid_h, grid_w):
@@ -48,7 +47,7 @@ class vit_models(nn.Module):
     """
     def __init__(self, img_size=224,  patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=(2/3)*4., qkv_bias=False, qk_scale=None, attn_drop_rate=0.,
-                 drop_path_rate=0., norm_layer=nn.RMSNorm,
+                 drop_path_rate=0., norm_layer=nn.LayerNorm,
                  block_layers = Block_SA,
                  Patch_layer=PatchEmbed,act_layer=nn.SiLU,
                  Attention_block = Attention, Mlp_block=SwiGLU,
@@ -92,8 +91,8 @@ class vit_models(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.RMSNorm):
-            # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0.0)
             nn.init.constant_(m.weight, 1.0)
 
     @torch.jit.ignore
@@ -151,35 +150,35 @@ class vit_models(nn.Module):
 def deit_tiny_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
-        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
     
 def deit_small_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
-        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
 
 def deit_medium_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=16, embed_dim=512, depth=12, num_heads=8, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
-        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
     return model 
 
 def deit_base_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
-        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
     
 def deit_large_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
-        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
     return model
 
 def deit_huge_patch14_LS(pretrained=False, img_size=224, pretrained_21k = False,  **kwargs):
     model = vit_models(
         img_size = img_size, patch_size=14, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
-        norm_layer=partial(nn.RMSNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers = Layer_scale_init_Block_SA, **kwargs)
     return model

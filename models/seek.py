@@ -1,6 +1,7 @@
 import math
 import torch
 import torch.nn as nn
+from functools import partial
 from timm.layers import trunc_normal_
 
 from models.transformer_blocks import BlockFiLM_SA,Layer_scale_init_BlockFiLM_SA
@@ -81,7 +82,7 @@ class Seek_Network(nn.Module):
         self.retpatch_mlp_out = nn.Linear(self.hidden_dim, imgfttok_dim+ret2d_dim, bias=True) # False
 
         ### Norm out (Normalize predicted patch tokens output)
-        self.norm_out = nn.RMSNorm(imgfttok_dim, eps=1e-6)
+        self.norm_out = nn.LayerNorm(imgfttok_dim, eps=1e-6)
 
         ### Type embeddings per token type
         self.type_emb_acttok = nn.Parameter(torch.zeros(self.hidden_dim))
@@ -103,10 +104,11 @@ class Seek_Network(nn.Module):
                 attn_drop=dropout,
                 drop_path=dpr[i],
                 proj_bias=False,
-                Mlp_bias=False
+                Mlp_bias=False,
+                norm_layer=partial(nn.LayerNorm, eps=1e-6)
             ) for i in range(num_layers)
         ])
-        self.final_norm = nn.RMSNorm(self.hidden_dim, eps=1e-6)
+        self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
 
         ### Mask token
         self.mask_retpatchtok = nn.Parameter(torch.zeros(self.hidden_dim))
@@ -127,8 +129,8 @@ class Seek_Network(nn.Module):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.RMSNorm):
-            # nn.init.constant_(m.bias, 0) # There is no bias for RMSNorm
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0.0)
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, noflat_acttok, noflat_imgfttoks, noflat_ret2D, crop_bv=None):
