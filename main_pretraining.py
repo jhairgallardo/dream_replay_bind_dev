@@ -26,6 +26,7 @@ from lightning.fabric import Fabric
 from lightning.fabric.loggers import CSVLogger, TensorBoardLogger
 
 import matplotlib.pyplot as plt
+import copy
 
 parser = argparse.ArgumentParser(description='Pre-training Dream Replay Bind')
 ### Dataset parameters
@@ -76,6 +77,7 @@ parser.add_argument('--episode_batch_size', type=int, default=96)
 parser.add_argument('--num_views', type=int, default=4)
 parser.add_argument('--coeff_mse', type=float, default=1.0)
 parser.add_argument('--coeff_bce', type=float, default=0.0)
+parser.add_argument('--ema_momentum', type=float, default=0.995)
 # Other parameters
 parser.add_argument('--workers', type=int, default=32)
 parser.add_argument('--save_dir', type=str, default="output/Pretraining/run_debug")
@@ -84,6 +86,11 @@ parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--zoom_min', type=float, default=0.08)
 parser.add_argument('--zoom_max', type=float, default=0.5)
 
+@torch.no_grad()
+def update_ema(student, teacher, momentum: float):
+    """EMA update: teacher = m * teacher + (1 - m) * student."""
+    for p_t, p_s in zip(teacher.parameters(), student.parameters()):
+        p_t.data.mul_(momentum).add_(p_s.data, alpha=1.0 - momentum)
 
 def main():
 
@@ -171,6 +178,15 @@ def main():
                                   num_Blocks=args.gen_num_Blocks, 
                                   nc=args.channels)
     # classifier = Classifier_Network(input_dim=args.bind_dim, num_classes=args.num_classes)
+
+    ### Define EMA view encoder (no gradients, used only to define targets)
+    view_encoder_ema = copy.deepcopy(view_encoder)
+    for p in view_encoder_ema.parameters():
+        p.requires_grad = False
+    view_encoder_ema.eval()
+    # EMA view encoder lives on device but is not wrapped with DDP or optimizer
+    view_encoder_ema.to(fabric.device)
+
                                                   
     ### Print models
     fabric.print('\nView encoder')
@@ -299,9 +315,14 @@ def main():
             batch_episodes_imgs = batch_episodes[0] # (B, V, C, H, W)
             batch_episodes_actions = batch_episodes[1] # (B, V, A)
             B, V, C, H, W = batch_episodes_imgs.shape
+            flat_imgs = batch_episodes_imgs.reshape(B * V, C, H, W) # (B*V, C, H, W)
+
+            # EMA View Encoder forward pass – uses this as targets for the MSE loss
+            with torch.no_grad():
+                flat_imgfttoks_ema_targets, _ = view_encoder_ema(flat_imgs)
+            noflat_imgfttoks_ema_targets = flat_imgfttoks_ema_targets.view(B, V, flat_imgfttoks_ema_targets.size(1), -1)
 
             # View Encoder forward pass
-            flat_imgs = batch_episodes_imgs.reshape(B * V, C, H, W) # (B*V, C, H, W)
             flat_imgfttoks, flat_ret2D = view_encoder(flat_imgs) # (B*V, Timg, D)
             noflat_imgfttoks = flat_imgfttoks.view(B, V, flat_imgfttoks.size(1), -1) # (B, V, Timg, Dimg)
             noflat_ret2D = flat_ret2D.view(B, V, flat_ret2D.size(1), -1) # (B, V, Timg, 2)
@@ -324,7 +345,8 @@ def main():
             # Generator + View Encoder forward pass
             noflat_PRED_imgs = generator(noflat_PRED_imgfttoks)
             flat_PRED_imgs = noflat_PRED_imgs.reshape(B * V, C, H, W) # (B*V, C, H, W)
-            flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D)
+            # flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D) # This one uses the student view encoder
+            flat_PRED2_imgfttoks, _ = view_encoder_ema(flat_PRED_imgs) # (B*V, Timg, D) # This one uses the EMA view encoder
             noflat_PRED2_imgfttoks = flat_PRED2_imgfttoks.view(B, V, flat_PRED2_imgfttoks.size(1), -1) # (B, V, Timg, Dimg)
 
             # # Bind forward pass
@@ -334,10 +356,15 @@ def main():
             # logits = classifier(canvas) # (B, K) -> It outputs a logit per episode.
 
             with fabric.autocast(): # Run losses calculations in mixed precision (models already run in mixed precision)
-                # Reconstruction losses in latent space
-                noflat_imgfttoks_detach = noflat_imgfttoks.detach()
-                loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_detach[:, :, mask_indices, :])
-                loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_detach)
+                # # Reconstruction losses in latent space (no ema)
+                # noflat_imgfttoks_detach = noflat_imgfttoks.detach()
+                # loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_detach[:, :, mask_indices, :])
+                # loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_detach)
+
+                # Reconstruction losses in latent space (with ema)
+                noflat_imgfttoks_ema_targets_detach = noflat_imgfttoks_ema_targets.detach()
+                loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_ema_targets_detach[:, :, mask_indices, :])
+                loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_ema_targets_detach)
 
                 # # BCE loss
                 # batch_labels_onehot = F.one_hot(batch_labels, num_classes=args.num_classes).float() # (B, K)
@@ -345,10 +372,6 @@ def main():
                 # loss_bce = F.binary_cross_entropy_with_logits(logits, batch_labels_onehot, pos_weight=pos_weight)
 
                 # Calculate Total loss for the batch
-                # if epoch<3:
-                #     w_mse2 = 0.0
-                # else:
-                #     w_mse2 = 1.0
                 loss_mse_total = loss_mse_1 + loss_mse_2
                 # loss_total = args.coeff_mse * loss_mse_total + args.coeff_bce * loss_bce
                 loss_total = args.coeff_mse * loss_mse_total
@@ -366,6 +389,9 @@ def main():
             fabric.clip_gradients(generator, optimizer, max_norm=1.0)
             # fabric.clip_gradients(classifier, optimizer, max_norm=1.0)
             optimizer.step()
+
+            ## Update EMA view encoder
+            update_ema(view_encoder, view_encoder_ema, args.ema_momentum)
 
             ## Update scheduler
             scheduler.step()
