@@ -309,7 +309,7 @@ class Episode_Transformations:
 
             if not fix_center_crop: # Sample random crop
                 # 1) sample zoom and angle
-                zoom = self._sample_zoom_powerlaw()
+                zoom = self._sample_zoom()
                 sin_th, cos_th = self._sample_theta()
                 # 2) compute side in pixels from zoom
                 side_px = _zoom_to_side_px(zoom, W, H)
@@ -323,7 +323,7 @@ class Episode_Transformations:
                 r_norm = 0.0 if R_hd == 0 else (R / R_hd)
                 r_norm = _clamp(r_norm, 0.0, 1.0) # Clamp just in case of tiny FP overshoot
             else: # Get crop for the center of the image
-                zoom = self._sample_zoom_powerlaw() #random.uniform(0.7, 1.0) #0.8 #self._sample_zoom()
+                zoom = self._sample_zoom() #random.uniform(0.7, 1.0) #0.8 #self._sample_zoom()
                 sin_th, cos_th = 0.0, 1.0
                 side_px = _zoom_to_side_px(zoom, W, H)
                 R = 0.0
