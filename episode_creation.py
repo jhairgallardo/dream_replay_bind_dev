@@ -242,7 +242,34 @@ class Episode_Transformations:
         if self.channels > 4:
             raise ValueError("More than 4 channels is not supported")
         
-    # ---- simple samplers (customize for temporal coherence if you want) ---- #
+    def _sample_zoom_powerlaw(self, gamma: float = 1.0) -> float:
+        """
+        Sample zoom ~ truncated power-law on [zmin, zmax] with pdf proportional to z^{-gamma}.
+        - gamma = 1.0  -> log-uniform (mild bias to small crops)
+        - gamma > 1.0  -> stronger bias to small crops
+        - gamma = 0.0  -> uniform
+        - gamma < 0.0  -> biases toward larger crops (not typical here)
+
+        Uses torch RNG so global seeds affect it.
+        Returns a Python float.
+        """
+        zmin, zmax = self.zoom_range
+        assert zmin > 0.0 and zmax > zmin, "Require 0 < zmin < zmax"
+        u = torch.rand((), dtype=torch.float32).item()
+
+        # Special case (log-uniform)
+        if abs(gamma - 1.0) < 1e-8:
+            return float(zmin * (zmax / zmin) ** u)
+
+        # General inverse-CDF for truncated power-law
+        a = zmin ** (1.0 - gamma)
+        b = zmax ** (1.0 - gamma)
+        z = (a + (b - a) * u) ** (1.0 / (1.0 - gamma))
+        # clamp for tiny numeric drift
+        if z < zmin: z = zmin
+        if z > zmax: z = zmax
+        return float(z)
+        
     def _sample_zoom(self) -> float:
         z0, z1 = self.zoom_range
         z0 = _clamp(z0, 0.0, 1.0)
@@ -254,8 +281,6 @@ class Episode_Transformations:
     def _sample_theta(self) -> Tuple[float, float]:
         th = random.uniform(-math.pi, math.pi)
         return math.sin(th), math.cos(th)
-
-    # ----------------------------------------------------------------------- #
 
     def _ensure_geom_image(self, img: Image.Image) -> Image.Image:
         """Ensure the geometry canvas is 224×224 (or geom_size×geom_size)."""
@@ -284,7 +309,7 @@ class Episode_Transformations:
 
             if not fix_center_crop: # Sample random crop
                 # 1) sample zoom and angle
-                zoom = self._sample_zoom()
+                zoom = self._sample_zoom_powerlaw()
                 sin_th, cos_th = self._sample_theta()
                 # 2) compute side in pixels from zoom
                 side_px = _zoom_to_side_px(zoom, W, H)
@@ -298,7 +323,7 @@ class Episode_Transformations:
                 r_norm = 0.0 if R_hd == 0 else (R / R_hd)
                 r_norm = _clamp(r_norm, 0.0, 1.0) # Clamp just in case of tiny FP overshoot
             else: # Get crop for the center of the image
-                zoom = self._sample_zoom() #random.uniform(0.7, 1.0) #0.8 #self._sample_zoom()
+                zoom = self._sample_zoom_powerlaw() #random.uniform(0.7, 1.0) #0.8 #self._sample_zoom()
                 sin_th, cos_th = 0.0, 1.0
                 side_px = _zoom_to_side_px(zoom, W, H)
                 R = 0.0
@@ -313,7 +338,8 @@ class Episode_Transformations:
 
         else: # no crop done, return the original image
             crop = base_img
-            act = None
+            # act for no crop is [0.0, 1.0, 0.0, 0.0]
+            act = torch.tensor([0.0, 1.0, 0.0, 0.0], dtype=torch.float32)
 
         return crop, act, crop_flag
 
