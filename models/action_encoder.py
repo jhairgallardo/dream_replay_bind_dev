@@ -6,7 +6,7 @@ from functools import partial
 from timm.layers import trunc_normal_
 from torch.nn.utils.rnn import pad_sequence
 
-from models.transformer_blocks import Attention, Block_SA, Layer_scale_init_Block_SA
+from models.transformer_blocks import Attention, Block_SA
 
 class SinCosPE(nn.Module):
     def __init__(self, dim, max_length):
@@ -137,7 +137,7 @@ class Action_Encoder_Network(nn.Module):
         # Transformer blocks
         dpr = [drop_path_rate for i in range(n_layers)]
         self.blocks = nn.ModuleList([
-            Layer_scale_init_Block_SA(
+            Block_SA(
                 dim=d_model,
                 num_heads=n_heads,
                 qkv_bias=True,
@@ -171,12 +171,12 @@ class Action_Encoder_Network(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        names = {"aug_tokeniser.type_emb.weight", "aug_tokeniser.pad_emb"}
+        names = {"aug_tokeniser.type_emb.weight", "aug_tokeniser.pad_emb", "pool_q"}
         return names
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            nn.init.xavier_normal_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):

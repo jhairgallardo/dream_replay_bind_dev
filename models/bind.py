@@ -1,8 +1,11 @@
 import math
 import torch
 import torch.nn as nn
+from functools import partial
 from timm.layers import trunc_normal_
 import math
+
+from models.transformer_blocks import Block_CA
 
 class SinCosPE(nn.Module):
     def __init__(self, dim, max_length):
@@ -27,7 +30,8 @@ class Bind_Network(nn.Module):
                  num_layers=2, 
                  nhead=4, 
                  dim_ff=512, 
-                 dropout=0):
+                 dropout=0,
+                 drop_path_rate=0.0):
         super(Bind_Network, self).__init__()
         
         ### Dimension of token input to transformer. We project all tokens to the same dimension.
@@ -47,21 +51,40 @@ class Bind_Network(nn.Module):
         self.pe = SinCosPE(self.hidden_dim, 5000) 
 
         ### Transformer decoder
-        dec_layer = nn.TransformerDecoderLayer(
-            d_model=self.hidden_dim, nhead=nhead,
-            dim_feedforward=dim_ff,
-            dropout=dropout, activation='gelu',
-            layer_norm_eps=1e-6, batch_first=True, norm_first=True
-        )
-        self.transformer_decoder = nn.TransformerDecoder(dec_layer, num_layers=num_layers, norm=nn.LayerNorm(self.hidden_dim, eps=1e-6))
+        dpr = [drop_path_rate for i in range(num_layers)]
+        self.blocks = nn.ModuleList([
+            Block_CA(
+                dim=self.hidden_dim,
+                num_heads=nhead,
+                qkv_bias=True,
+                drop=dropout,
+                attn_drop=dropout,
+                drop_path=dpr[i],
+                proj_bias=False,
+                Mlp_bias=False,
+                norm_layer=partial(nn.LayerNorm, eps=1e-6)
+            ) for i in range(num_layers)
+        ])
+        self.final_norm = nn.LayerNorm(self.hidden_dim, eps=1e-6)
 
         ### Canvas Queries
         self.canvas_queries = nn.Parameter(torch.zeros(num_queries, self.hidden_dim))
         trunc_normal_(self.canvas_queries, std=0.02)
 
+        self.apply(self._init_weights)
+
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'canvas_queries'}
+        return {'canvas_queries', 'type_emb_acttok', 'type_emb_glopatch'}
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_normal_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0.0)
+            nn.init.constant_(m.weight, 1.0)
 
     def convert_ret2d_to_glo2d(self, noflat_ret2D, noflat_raw_actions):
         """
@@ -156,6 +179,8 @@ class Bind_Network(nn.Module):
         canvas_queries = canvas_queries + self.pe(canvas_queries.size(1)) # (B, num_queries, Dhidden)
 
         # 7) Forward pass through transformer
-        canvas_outputs = self.transformer_decoder(tgt=canvas_queries, memory=cross_seqs) # (B, num_queries, Dhidden)
+        for blk in self.blocks:
+            canvas_queries = blk(canvas_queries, memory=cross_seqs) # (B, num_queries, Dhidden)
+        canvas_outputs = self.final_norm(canvas_queries) # (B, num_queries, Dhidden)
 
         return canvas_outputs

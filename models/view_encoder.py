@@ -88,7 +88,7 @@ class vit_models(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            nn.init.xavier_normal_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -97,7 +97,7 @@ class vit_models(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {'pos_embed'}
+        return {'pos_embed', 'register_tokens'}
     
     def get_num_layers(self):
         return len(self.blocks)

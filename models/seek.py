@@ -4,7 +4,7 @@ import torch.nn as nn
 from functools import partial
 from timm.layers import trunc_normal_
 
-from models.transformer_blocks import BlockFiLM_SA,Layer_scale_init_BlockFiLM_SA
+from models.transformer_blocks import BlockFiLM_SA
 
 class SinCosPE(nn.Module):
     def __init__(self, dim, max_length):
@@ -96,7 +96,7 @@ class Seek_Network(nn.Module):
         ### Transformer blocks
         dpr = [drop_path_rate for i in range(num_layers)]
         self.blocks = nn.ModuleList([
-            Layer_scale_init_BlockFiLM_SA(
+            BlockFiLM_SA(
                 dim=self.hidden_dim,
                 num_heads=nhead,
                 qkv_bias=True,
@@ -122,11 +122,11 @@ class Seek_Network(nn.Module):
 
     @torch.jit.ignore
     def no_weight_decay(self):
-        return {}
+        return {'mask_retpatchtok', 'type_emb_mask_retpatchtok', 'type_emb_acttok', 'type_emb_retpatch'}
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=.02)
+            nn.init.xavier_normal_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
