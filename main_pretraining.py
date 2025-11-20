@@ -26,7 +26,7 @@ from lightning.fabric import Fabric
 from lightning.fabric.loggers import CSVLogger, TensorBoardLogger
 
 import matplotlib.pyplot as plt
-# import copy
+import copy
 
 parser = argparse.ArgumentParser(description='Pre-training Dream Replay Bind')
 ### Dataset parameters
@@ -77,7 +77,8 @@ parser.add_argument('--episode_batch_size', type=int, default=96)
 parser.add_argument('--num_views', type=int, default=4)
 parser.add_argument('--coeff_mse', type=float, default=1.0)
 parser.add_argument('--coeff_bce', type=float, default=1.0)
-# parser.add_argument('--ema_momentum', type=float, default=0.995)
+parser.add_argument('--freeze_view_encoder', action='store_true', default=False)
+parser.add_argument('--ema_momentum_view_encoder', type=float, default=None) # None for no EMA
 ### Other parameters
 parser.add_argument('--workers', type=int, default=32)
 parser.add_argument('--save_dir', type=str, default="output/Pretraining/run_debug")
@@ -86,16 +87,20 @@ parser.add_argument('--seed', type=int, default=0)
 parser.add_argument('--zoom_min', type=float, default=0.08)
 parser.add_argument('--zoom_max', type=float, default=0.5)
 
-# @torch.no_grad()
-# def update_ema(student, teacher, momentum: float):
-#     """EMA update: teacher = m * teacher + (1 - m) * student."""
-#     for p_t, p_s in zip(teacher.parameters(), student.parameters()):
-#         p_t.data.mul_(momentum).add_(p_s.data, alpha=1.0 - momentum)
+@torch.no_grad()
+def update_ema(student, teacher, momentum: float):
+    """EMA update: teacher = m * teacher + (1 - m) * student."""
+    for p_t, p_s in zip(teacher.parameters(), student.parameters()):
+        p_t.data.mul_(momentum).add_(p_s.data, alpha=1.0 - momentum)
 
 def main():
 
     ### Parse arguments
     args = parser.parse_args()
+
+    ### Rise error if EMA momentum is not None and freeze view encoder is True
+    if args.ema_momentum_view_encoder is not None and args.freeze_view_encoder:
+        raise ValueError("EMA momentum is not None and freeze view encoder is True. This is not allowed.")
 
     ### Create save dir folder
     if not os.path.exists(args.save_dir): 
@@ -179,13 +184,14 @@ def main():
                                   nc=args.channels)
     classifier = Classifier_Network(input_dim=args.bind_dim, num_classes=args.num_classes)
 
-    # ### Define EMA view encoder (no gradients, used only to define targets)
-    # view_encoder_ema = copy.deepcopy(view_encoder)
-    # for p in view_encoder_ema.parameters():
-    #     p.requires_grad = False
-    # view_encoder_ema.eval()
-    # # EMA view encoder lives on device but is not wrapped with DDP or optimizer
-    # view_encoder_ema.to(fabric.device)
+    if args.ema_momentum_view_encoder is not None:
+        ### Define EMA view encoder (no gradients, used only to define targets)
+        view_encoder_ema = copy.deepcopy(view_encoder)
+        for p in view_encoder_ema.parameters():
+            p.requires_grad = False
+        view_encoder_ema.eval()
+        # EMA view encoder lives on device but is not wrapped with DDP or optimizer
+        view_encoder_ema.to(fabric.device)
 
                                                   
     ### Print models
@@ -298,12 +304,12 @@ def main():
         train_acc5 = MetricLogger('Train Top5 ACC')
 
         # if epoch < 0:
-        view_encoder.train()
-        # else:
-        #     view_encoder.eval()
-        #     # freeze view encoder
-        #     for param in view_encoder.parameters():
-        #         param.requires_grad = False
+        if args.freeze_view_encoder:
+            view_encoder.eval()
+            for param in view_encoder.parameters():
+                param.requires_grad = False
+        else:
+            view_encoder.train()
         action_encoder.train()
         seek.train()
         bind.train()
@@ -316,10 +322,11 @@ def main():
             B, V, C, H, W = batch_episodes_imgs.shape
             flat_imgs = batch_episodes_imgs.reshape(B * V, C, H, W) # (B*V, C, H, W)
 
-            # # EMA View Encoder forward pass – uses this as targets for the MSE loss
-            # with torch.no_grad():
-            #     flat_imgfttoks_ema_targets, _ = view_encoder_ema(flat_imgs)
-            # noflat_imgfttoks_ema_targets = flat_imgfttoks_ema_targets.view(B, V, flat_imgfttoks_ema_targets.size(1), -1)
+            if args.ema_momentum_view_encoder is not None:
+                # EMA View Encoder forward pass – uses this as targets for the MSE loss
+                with torch.no_grad():
+                    flat_imgfttoks_ema_targets, _ = view_encoder_ema(flat_imgs)
+                noflat_imgfttoks_ema_targets = flat_imgfttoks_ema_targets.view(B, V, flat_imgfttoks_ema_targets.size(1), -1)
 
             # View Encoder forward pass
             flat_imgfttoks, flat_ret2D = view_encoder(flat_imgs) # (B*V, Timg, D)
@@ -344,8 +351,10 @@ def main():
             # Generator + View Encoder forward pass
             noflat_PRED_imgs = generator(noflat_PRED_imgfttoks)
             flat_PRED_imgs = noflat_PRED_imgs.reshape(B * V, C, H, W) # (B*V, C, H, W)
-            flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D) # This one uses the student view encoder
-            # flat_PRED2_imgfttoks, _ = view_encoder_ema(flat_PRED_imgs) # (B*V, Timg, D) # This one uses the EMA view encoder
+            if args.ema_momentum_view_encoder is not None:
+                flat_PRED2_imgfttoks, _ = view_encoder_ema(flat_PRED_imgs) # (B*V, Timg, D) # This one uses the EMA view encoder
+            else:
+                flat_PRED2_imgfttoks, _ = view_encoder(flat_PRED_imgs) # (B*V, Timg, D) # This one uses the student view encoder
             noflat_PRED2_imgfttoks = flat_PRED2_imgfttoks.view(B, V, flat_PRED2_imgfttoks.size(1), -1) # (B, V, Timg, Dimg)
 
             # Bind forward pass
@@ -355,15 +364,16 @@ def main():
             logits = classifier(canvas) # (B, K) -> It outputs a logit per episode.
 
             with fabric.autocast(): # Run losses calculations in mixed precision (models already run in mixed precision)
-                # Reconstruction losses in latent space (no ema)
-                noflat_imgfttoks_detach = noflat_imgfttoks.detach()
-                loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_detach[:, :, mask_indices, :])
-                loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_detach)
-
-                # # Reconstruction losses in latent space (with ema)
-                # noflat_imgfttoks_ema_targets_detach = noflat_imgfttoks_ema_targets.detach()
-                # loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_ema_targets_detach[:, :, mask_indices, :])
-                # loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_ema_targets_detach)
+                if args.ema_momentum_view_encoder is not None:
+                    # Reconstruction losses in latent space (with ema)
+                    noflat_imgfttoks_ema_targets_detach = noflat_imgfttoks_ema_targets.detach()
+                    loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_ema_targets_detach[:, :, mask_indices, :])
+                    loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_ema_targets_detach)
+                else:
+                    # Reconstruction losses in latent space (no ema)
+                    noflat_imgfttoks_detach = noflat_imgfttoks.detach()
+                    loss_mse_1 = F.mse_loss(noflat_PRED_imgfttoks[:, :, mask_indices, :], noflat_imgfttoks_detach[:, :, mask_indices, :])
+                    loss_mse_2 = F.mse_loss(noflat_PRED2_imgfttoks, noflat_imgfttoks_detach)
 
                 # BCE loss
                 batch_labels_onehot = F.one_hot(batch_labels, num_classes=args.num_classes).float() # (B, K)
@@ -373,7 +383,6 @@ def main():
                 # Calculate Total loss for the batch
                 loss_mse_total = loss_mse_1 + loss_mse_2
                 loss_total = args.coeff_mse * loss_mse_total + args.coeff_bce * loss_bce
-                # loss_total = args.coeff_mse * loss_mse_total
 
                 # Classification accuracy (works for a non multi-label classification task)
                 acc1, acc5 = accuracy(logits, batch_labels, topk=(1, 5))
@@ -389,8 +398,9 @@ def main():
             fabric.clip_gradients(classifier, optimizer, max_norm=1.0)
             optimizer.step()
 
-            # ## Update EMA view encoder
-            # update_ema(view_encoder, view_encoder_ema, args.ema_momentum)
+            if args.ema_momentum_view_encoder is not None:
+                ## Update EMA view encoder
+                update_ema(view_encoder, view_encoder_ema, args.ema_momentum_view_encoder)
 
             ## Update scheduler
             scheduler.step()
