@@ -8,7 +8,7 @@ from torchvision.datasets import ImageFolder
 
 from episode_creation import Episode_Transformations, collate_function_notaskid, DeterministicEpisodes, ImageFolderDetEpisodes
 
-from models.view_encoder import deit_tiny_patch16_LS
+from models.view_encoder import *
 from models.action_encoder import Action_Encoder_Network
 from models.seek import Seek_Network
 from models.bind import Bind_Network
@@ -38,6 +38,7 @@ parser.add_argument('--std', type=list, default=[0.5, 0.5, 0.5])
 parser.add_argument('--channels', type=int, default=4)
 parser.add_argument('--only_crop', action='store_true', default=False)
 ### View encoder parameters
+parser.add_argument('--venc_model', type=str, default='deit_tiny_patch16_LS')
 parser.add_argument('--lr_venc', type=float, default=0.0008)
 parser.add_argument('--wd_venc', type=float, default=0.05)
 parser.add_argument('--venc_drop_path', type=float, default=0.0125) # 0.0125 for tiny, 0.05 for small, 0.2 for base
@@ -61,7 +62,6 @@ parser.add_argument('--wd_bind', type=float, default=0.001)
 parser.add_argument('--bind_dim', type=int, default=128)
 parser.add_argument('--bind_n_layers', type=int, default=2)
 parser.add_argument('--bind_n_heads', type=int, default=4)
-parser.add_argument('--bind_dim_ff', type=int, default=512)
 parser.add_argument('--bind_dropout', type=float, default=0)
 ### Generator parameters
 parser.add_argument('--lr_gen', type=float, default=0.0008)
@@ -159,7 +159,7 @@ def main():
 
     ### Define models
     fabric.print('\n==> Prepare models...')
-    view_encoder = deit_tiny_patch16_LS(drop_path_rate=args.venc_drop_path, in_chans=args.channels)
+    view_encoder = eval(args.venc_model)(drop_path_rate=args.venc_drop_path, in_chans=args.channels)
     action_encoder = Action_Encoder_Network(d_model=args.act_enc_dim, 
                                             n_layers=args.act_enc_n_layers, 
                                             n_heads=args.act_enc_n_heads,
@@ -177,7 +177,6 @@ def main():
                         acttok_dim=args.act_enc_dim,
                         num_layers=args.bind_n_layers,
                         nhead=args.bind_n_heads,
-                        dim_ff=args.bind_dim_ff,
                         dropout=args.bind_dropout)
     generator = Generator_Network(in_planes=view_encoder.embed_dim, 
                                   num_Blocks=args.gen_num_Blocks, 
@@ -804,7 +803,7 @@ def main():
         elapsed_time = time.time() - init_time
         fabric.print(f"Epoch [{epoch}] Epoch Time: {time_duration_print(epoch_time)} -- Elapsed Time: {time_duration_print(elapsed_time)}")
 
-        # if epoch==50: # Break at epoch = 50 to save time for debugging
+        # if epoch==30: # Break at epoch = 50 to save time for debugging
         #     break
 
     return None

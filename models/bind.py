@@ -29,7 +29,6 @@ class Bind_Network(nn.Module):
                  acttok_dim=64, 
                  num_layers=2, 
                  nhead=4, 
-                 dim_ff=512, 
                  dropout=0,
                  drop_path_rate=0.0):
         super(Bind_Network, self).__init__()

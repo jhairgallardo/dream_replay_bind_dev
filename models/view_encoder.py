@@ -19,6 +19,16 @@ from timm.layers import to_2tuple, trunc_normal_
 # -> No Bias
 # -> Replace Mlp with SwiGLU
 
+__all__ = [
+        'deit_nano_patch16_LS',
+        'deit_tiny_patch16_LS',
+        'deit_small_patch16_LS',
+        'deit_medium_patch16_LS',
+        'deit_base_patch16_LS',
+        'deit_large_patch16_LS',
+        'deit_huge_patch14_LS',
+        ]
+
 def _make_sincos_pos_embed(embed_dim, grid_h, grid_w):
     # build 2D grid
     y = torch.arange(grid_h).float()
@@ -146,6 +156,12 @@ class vit_models(nn.Module):
         ret2D = ret2D / 112.0  # shape (B, Timg, 2), ~[-0.928, 0.928] for 224/16
 
         return x, ret2D
+
+def deit_nano_patch16_LS(img_size=224, **kwargs):
+    model = vit_models(
+        img_size = img_size, patch_size=16, embed_dim=192, depth=6, num_heads=3, mlp_ratio=(2/3)*4, qkv_bias=True, proj_bias=False, Mlp_bias=False,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6),block_layers=Layer_scale_init_Block_SA, **kwargs)
+    return model
 
 def deit_tiny_patch16_LS(img_size=224, **kwargs):
     model = vit_models(
