@@ -153,7 +153,7 @@ def main():
     val_transform = DeterministicEpisodes(val_base_transform, base_seed=args.val_episode_seed)
     val_dataset = ImageFolderDetEpisodes(valdir, transform=val_transform)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=args.episode_batch_size, shuffle=False,
-                                             num_workers=args.workers, pin_memory=True,
+                                             num_workers=args.workers, pin_memory=True, persistent_workers=True,
                                              collate_fn=collate_function_notaskid)
     val_loader = fabric.setup_dataloaders(val_loader)
 
@@ -207,6 +207,14 @@ def main():
     fabric.print('\nClassifier')
     fabric.print(classifier)
     fabric.print('\n')
+
+    ### Compile models
+    view_encoder = torch.compile(view_encoder)
+    # action_encoder = torch.compile(action_encoder) # It uses lists inside. It is tricky to compile.
+    # seek = torch.compile(seek) # Having variable masking ratio is tricky to compile.
+    bind = torch.compile(bind)
+    # generator = torch.compile(generator) # Can't compile the upsampling layers.
+    classifier = torch.compile(classifier)
 
     ### Setup models
     view_encoder = fabric.setup_module(view_encoder)
