@@ -33,7 +33,6 @@ wd_bind=0.001
 bind_dim=128
 bind_n_layers=2
 bind_n_heads=4
-bind_dim_ff=512
 bind_dropout=0
 ### Generator parameters
 lr_gen=7.3e-4 #0.0008
@@ -89,7 +88,6 @@ python -u main_pretraining.py \
     --bind_dim ${bind_dim} \
     --bind_n_layers ${bind_n_layers} \
     --bind_n_heads ${bind_n_heads} \
-    --bind_dim_ff ${bind_dim_ff} \
     --bind_dropout ${bind_dropout} \
     --lr_gen ${lr_gen} \
     --wd_gen ${wd_gen} \
