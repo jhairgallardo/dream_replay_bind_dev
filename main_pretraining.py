@@ -208,14 +208,6 @@ def main():
     fabric.print(classifier)
     fabric.print('\n')
 
-    ### Compile models
-    view_encoder = torch.compile(view_encoder)
-    # action_encoder = torch.compile(action_encoder) # It uses lists inside. It is tricky to compile.
-    # seek = torch.compile(seek) # Having variable masking ratio is tricky to compile.
-    bind = torch.compile(bind)
-    # generator = torch.compile(generator) # Can't compile the upsampling layers.
-    classifier = torch.compile(classifier)
-
     ### Setup models
     view_encoder = fabric.setup_module(view_encoder)
     action_encoder = fabric.setup_module(action_encoder)
