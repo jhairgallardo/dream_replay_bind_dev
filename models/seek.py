@@ -114,6 +114,9 @@ class Seek_Network(nn.Module):
         self.mask_retpatchtok = nn.Parameter(torch.zeros(self.hidden_dim))
         trunc_normal_(self.mask_retpatchtok, std=0.02)
 
+        ### Mask mlp_in
+        self.mask_mlp_in = nn.Linear(self.hidden_dim+ret2d_dim, self.hidden_dim, bias=True) # False
+
         ### Type embeddings for mask tokens
         self.type_emb_mask_retpatchtok = nn.Parameter(torch.zeros(self.hidden_dim))
         trunc_normal_(self.type_emb_mask_retpatchtok, std=0.02)
@@ -175,8 +178,8 @@ class Seek_Network(nn.Module):
         # 5) Pre-compute positional encoding
         pe = self.pe(base_seqs.size(1)) # (1, V*(1+Timg), Dhidden)
 
-        # 6) Get mask token and add type embedding
-        mask_retpatchtok = self.mask_retpatchtok + self.type_emb_mask_retpatchtok # (Dhidden)
+        # # 6) Get mask token and add type embedding
+        # mask_retpatchtok = self.mask_retpatchtok + self.type_emb_mask_retpatchtok # (Dhidden)
 
         # 7) Generate a random mask with a random ratio between 0.75 and 1.0 per minibatch
         ratio_range=(0.75, 1.0)
@@ -199,8 +202,17 @@ class Seek_Network(nn.Module):
             start = i*(1+Timg)+1
             end = (i+1)*(1+Timg)
 
+            # Prepare mask tokens. First expand it
+            mask_retpatchtok = self.mask_retpatchtok.reshape(1, 1, Dhidden).expand(B, num_masked_tokens, Dhidden)
+            # Concat the corresponding ret2D features according to the mask indices
+            mask_retpatchtok = torch.cat((mask_retpatchtok, noflat_ret2D[:, i, mask_indices, :]), dim=-1)
+            # Project the mask tokens to the hidden dimension
+            mask_retpatchtok = self.mask_mlp_in(mask_retpatchtok)
+            # add type embedding
+            mask_retpatchtok = mask_retpatchtok + self.type_emb_mask_retpatchtok.reshape(1, 1, Dhidden).expand(B, num_masked_tokens, Dhidden)
+
             # Mask current view
-            seqs[:, start:end, :][:, mask_indices, :] = mask_retpatchtok.reshape(1, 1, Dhidden).expand(B, num_masked_tokens, Dhidden)
+            seqs[:, start:end, :][:, mask_indices, :] = mask_retpatchtok #.reshape(1, 1, Dhidden).expand(B, num_masked_tokens, Dhidden)
 
             # Add positional encoding
             x = seqs + pe[:, :seqs.size(1), :]
