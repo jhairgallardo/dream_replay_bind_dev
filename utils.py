@@ -10,7 +10,38 @@ from collections import defaultdict
 
 import torch.nn as nn
 import random
+import torchvision.transforms.functional as TF
+from PIL import ImageDraw, ImageFont
 
+def draw_unmasked_badge(img_tensor, text="UNMASKED"):
+    """Overlay a high-contrast badge on the top-center of a CHW tensor in [0, 1]."""
+    pil_img = TF.to_pil_image(img_tensor.clamp(0, 1))
+    draw = ImageDraw.Draw(pil_img, "RGBA")
+    width, height = pil_img.size
+
+    font_size = max(18, height // 12)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+    except OSError:
+        font = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    pad = font_size // 3
+    box_w = text_w + 2 * pad
+    box_h = text_h + 2 * pad
+    box_x = max(0, (width - box_w) // 2)
+    box_y = pad // 2
+
+    draw.rectangle([box_x, box_y, box_x + box_w, box_y + box_h],
+                   fill=(0, 0, 0, 210))
+    draw.text((box_x + pad, box_y + pad), text, font=font,
+              fill=(255, 255, 255, 255))
+
+    return TF.to_tensor(pil_img)
+    
 def seed_everything_with_fabric(seed: int, fabric):
     os.environ['PYTHONHASHSEED'] = str(seed)
     torch.manual_seed(seed)
